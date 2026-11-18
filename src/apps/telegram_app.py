@@ -30,7 +30,18 @@ class TelegramApp:
         return perception.find_window(TELEGRAM, previous_wid)
 
     def read_conversation(self, **kwargs):
-        return perception.read_conversation(profile=TELEGRAM, **kwargs)
+        res = perception.read_conversation(profile=TELEGRAM, **kwargs)
+        # 标题以 AX 头部按钮为准：校准区可能把聊天区第一行圈进去，OCR 标题会变成
+        # 消息正文（实测 BotFather 读成「/mybots - edit your bots」）。白名单靠它，
+        # 必须稳定。
+        if res.get("ok") and res.get("window"):
+            try:
+                title = ax_input.chat_title(res["window"], self.bundle_ids)
+            except Exception:
+                title = ""
+            if title:
+                res = dict(res, chat_title=title)
+        return res
 
     def locate_input(self, win):
         return ax_input.locate_input(win, self.bundle_ids)

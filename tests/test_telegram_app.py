@@ -29,9 +29,10 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(WECHAT.layout.title_bar_y_max, perception.TITLE_BAR_Y_MAX)
         self.assertEqual(WECHAT.app_names, perception.WECHAT_APP_NAMES)
 
-    def test_telegram_requires_calibration_and_nearest_title(self):
+    def test_telegram_requires_calibration_and_geometry_sides(self):
         self.assertTrue(TELEGRAM.requires_calibration)
-        self.assertEqual(TELEGRAM.title_pick, 'nearest')
+        self.assertEqual(TELEGRAM.title_pick, 'below_chrome')
+        self.assertEqual(TELEGRAM.side_mode, 'geometry')
         self.assertEqual(by_key('telegram'), TELEGRAM)
         self.assertIsNone(by_key('feishu'))
 
@@ -69,6 +70,24 @@ class TelegramAppTests(unittest.TestCase):
         res = perception.read_conversation(profile=TELEGRAM)
         self.assertFalse(res['ok'])
         self.assertIn('校准', res['error'])
+
+
+class HeaderTitleTests(unittest.TestCase):
+    def test_widest_labelled_header_button_is_the_title(self):
+        import ax_input
+        win = (0, 0, 480, 616)
+        buttons = [("Back", (10, 30, 40, 30)),
+                   ("BotFather", (60, 30, 300, 30)),
+                   ("Search", (380, 30, 40, 30)),
+                   ("More", (430, 30, 40, 30)),
+                   ("", (470, 30, 10, 10))]
+        self.assertEqual(ax_input.title_from_buttons(buttons, win), "BotFather")
+
+    def test_message_area_buttons_are_not_titles(self):
+        import ax_input
+        win = (0, 0, 480, 616)
+        buttons = [("Send", (410, 560, 40, 30)), ("Emoji", (350, 560, 40, 30))]
+        self.assertEqual(ax_input.title_from_buttons(buttons, win), "")
 
 
 class SendButtonTests(unittest.TestCase):
@@ -143,8 +162,13 @@ class CalibratedTitleTests(unittest.TestCase):
             return perception.read_calibrated(object(), cal, win, title_pick=pick,
                                               noise=noise)['chat_title']
 
-    def test_nearest_skips_the_window_title(self):
-        self.assertEqual(self.run_title('nearest'), 'Saved Messages')
+    def test_below_chrome_skips_title_bar_and_subtitle(self):
+        # Telegram 顶部：窗口标题 / 会话标题 / 副标题（成员数）——取会话标题
+        header = [TextBlock('Telegram @ usher', 1.0, .10, .959, .20, .024),
+                  TextBlock('BotFather', 1.0, .20, .881, .20, .024),
+                  TextBlock('8,123,424 monthly users', 1.0, .20, .851, .30, .022)]
+        self.assertEqual(self.run_title('below_chrome', header=header, top=.148),
+                         'BotFather')
 
     def test_top_keeps_legacy_behaviour(self):
         self.assertEqual(self.run_title('top'), 'Telegram @ usher')
@@ -162,6 +186,27 @@ class CalibratedTitleTests(unittest.TestCase):
         # 没有 profile noise 时最近一行就是副标题——这正是要避免的串会话
         self.assertEqual(self.run_title('nearest', header=header, top=.16),
                          '5 members, 2 online')
+
+
+class GeometrySideTests(unittest.TestCase):
+    def side(self, messages):
+        import perception
+        from calibration import Calibration
+        with patch.object(perception, 'ocr_image', side_effect=[[], []]), \
+             patch('calibrated_messages.extract', return_value=messages), \
+             patch('calibrated_messages.recover_numeric_bubbles',
+                   side_effect=lambda image, blocks, rect: blocks):
+            cal = Calibration(480.0, 616.0, 19.1, 91.3, 444.5, 464.0)
+            win = {'wid': 1, 'title': '', 'w': 480.0, 'h': 616.0, 'x': 0.0, 'y': 0.0}
+            res = perception.read_calibrated(object(), cal, win, side_mode='geometry')
+        return [m.side for m in res['messages']]
+
+    def test_left_is_them_right_is_me_centre_is_unknown(self):
+        from perception import Message
+        msgs = [Message('左', 'unknown', .5, 1, x=.06, w=.38),
+                Message('右', 'unknown', .5, 1, x=.74, w=.22),
+                Message('中', 'unknown', .5, 1, x=.30, w=.50)]
+        self.assertEqual(self.side(msgs), ['them', 'me', 'unknown'])
 
 
 class InlineTimeTests(unittest.TestCase):

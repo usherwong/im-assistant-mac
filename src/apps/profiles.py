@@ -48,6 +48,9 @@ class Profile:
     # text). "nearest": the header line closest to the message region wins — macOS draws
     # the window title ("Telegram @ account") above the conversation title.
     title_pick: str = "top"
+    # "bubble"：按气泡表面像素判归属（微信，已验证）；"geometry"：按文字块贴左/贴右判
+    # 归属（Telegram 深色主题下气泡色差不可靠，实测全判 unknown）。
+    side_mode: str = "bubble"
     # Telegram draws the message time inside the bubble's bottom-right corner, so Vision
     # merges it into the body ("hello 19:18"). The capture path strips a trailing
     # whitespace-separated time plus read marks; WeChat's time is a separate line.
@@ -102,7 +105,8 @@ TELEGRAM = Profile(
                   min_window_h=400),
     noise=TELEGRAM_NOISE,
     requires_calibration=True,
-    title_pick="nearest",
+    title_pick="below_chrome",
+    side_mode="geometry",
     strip_inline_time=True,
 )
 

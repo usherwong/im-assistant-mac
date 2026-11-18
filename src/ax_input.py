@@ -178,6 +178,53 @@ def _resolve(win: dict, bundle_ids):
     return app_el, win_el, None
 
 
+# Header chrome buttons that are never the conversation title.
+HEADER_BUTTONS = {"back", "search", "more", "close", "minimize", "settings", "menu", ""}
+
+
+def title_from_buttons(buttons, win_rect) -> str:
+    """Pick the conversation title button out of the window header.
+
+    Telegram draws the chat header as one wide AXButton ("BotFather", group name, …)
+    between the Back and Search buttons. It is the widest labelled button in the top
+    third of the window — far more reliable than OCR-ing a header band whose position
+    depends on the user's calibration.
+    """
+    if not win_rect:
+        return ""
+    wx, wy, ww, wh = win_rect
+    best = None
+    for label, r in buttons:
+        lab = (label or "").strip()
+        if not lab or lab.lower() in HEADER_BUTTONS or r is None:
+            continue
+        x, y, w, h = r
+        if (y + h / 2 - wy) / wh > .30:          # header only
+            continue
+        if w / ww < .15:                         # narrow buttons are icons (Back/Search/More)
+            continue
+        if best is None or w > best[1]:
+            best = (lab, w)
+    return best[0] if best else ""
+
+
+def chat_title(win: dict, bundle_ids: tuple[str, ...]) -> str:
+    """Conversation title straight from the AX header button (empty when unavailable)."""
+    _, win_el, _ = _resolve(win, bundle_ids)
+    if win_el is None:
+        return ""
+    rect = _rect(win_el)
+    if rect is None:
+        return ""
+    buttons = []
+    for el in walk(win_el):
+        if _role(el) != "AXButton":
+            continue
+        label = _attr(el, AS.kAXTitleAttribute) or _attr(el, AS.kAXDescriptionAttribute) or ""
+        buttons.append((str(label), _rect(el)))
+    return title_from_buttons(buttons, rect)
+
+
 def locate_input(win: dict, bundle_ids: tuple[str, ...]) -> dict:
     """Return the composer element plus its screen rect; HUD's fill target shape."""
     base = {"box": None, "rect": None, "window": dict(win), "reason": None}

@@ -867,6 +867,7 @@ class HudController(NSObject):
                 title_pick=prof.title_pick if prof else "top",
                 strip_time=bool(prof and prof.strip_inline_time),
                 noise=prof.noise if prof else None,
+                side_mode=prof.side_mode if prof else "bubble",
                 find_window=app.find_window)
         except (ValueError,OSError) as e:
             self._calibrating = False

@@ -740,7 +740,7 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 
 
 def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
-                    title_pick="top", strip_time=False, noise=None):
+                    title_pick="top", strip_time=False, noise=None, side_mode="bubble"):
     """Explicit selected region. Never infer a fill target from a message selection.
 
     capture_ms: time read_conversation already spent finding the window and capturing
@@ -759,7 +759,12 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
     candidates = [b for b in header if not _is_noise(b, noise) and b.x < x+w*.75]
     title = ""
     if candidates:
-        if title_pick == "nearest":
+        if title_pick == "below_chrome":
+            # Telegram 顶部是 macOS 标题栏（"Telegram @ 账号"），下面是会话标题和
+            # 副标题（成员数/在线状态）。跳过最上面 6%，剩下最靠上的一行就是会话标题。
+            rest = [b for b in candidates if (1 - b.y) >= .06]
+            top = max((b.y + b.h for b in (rest or candidates)))
+        elif title_pick == "nearest":
             ref = 1 - y
             above = [b for b in candidates if b.y >= ref - 1e-6]
             pick = (min(above, key=lambda b: b.y) if above
@@ -773,6 +778,13 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
     blocks = recover_numeric_bubbles(image, blocks, (x,y,w,h))
     t_recover = time.perf_counter()
     msgs = extract(image, blocks, (x,y,w,h), max_messages)
+    if side_mode == "geometry":
+        # Telegram：气泡贴左=对方、贴右=我。比像素色差稳，深色主题/自定义壁纸都能用。
+        for m in msgs:
+            rel_l = (m.x - x) / w
+            rel_r = (m.x + m.w - x) / w
+            center = (rel_l + rel_r) / 2
+            m.side = "them" if center <= .42 else "me" if center >= .58 else "unknown"
     if strip_time:
         for m in msgs:
             if m.lines:
@@ -842,7 +854,8 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
                                capture_ms=capture_ms,
                                title_pick=(profile.title_pick if profile is not None else "top"),
                                strip_time=bool(profile is not None and profile.strip_inline_time),
-                               noise=(profile.noise if profile is not None else None))
+                               noise=(profile.noise if profile is not None else None),
+                               side_mode=(profile.side_mode if profile is not None else "bubble"))
     from input_region import input_outline
     try:
         outline = input_outline(image) if image is not None else None
