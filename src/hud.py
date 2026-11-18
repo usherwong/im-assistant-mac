@@ -229,6 +229,10 @@ class HudController(NSObject):
         self._auto_failures = 0
         self._auto_paused = False
         self._auto_last_key = None
+        # 启动/切回聊天时屏幕上已经存在的消息不自动回复：只有「亲眼看着到达」的
+        # 下一条才会触发，避免一打开应用就替旧消息回话。
+        self._auto_first = True
+        self._auto_suppress_text = None
         self.conversations = None
         try:
             self.conversations = chat_context.Conversations()
@@ -1335,6 +1339,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _auto_cancel(self, reason: str = ""):
+        was = getattr(self, "_auto", None) is not None
         evt = getattr(self, "_auto_cancel_evt", None)
         if evt is not None:
             evt.set()
@@ -1342,7 +1347,7 @@ class HudController(NSObject):
         if lock is not None:
             with lock:
                 self._auto = None
-        if reason:
+        if reason and was:
             _log(f"自动回复取消 · {reason}")
 
     @objc.python_method
@@ -1368,11 +1373,18 @@ class HudController(NSObject):
         key = getattr(self, "_reply_key", None)
         if app is None or key is None or app.key != "wechat":
             return
-        chat = key[1] or ""
+        chat = (key[1] or "").strip()
+        if newest.text == getattr(self, "_auto_suppress_text", None):
+            # 只压这一条：清掉标记后，下一条（哪怕内容相同）就会正常进入自动回复。
+            self._auto_suppress_text = None
+            _log("自动回复跳过 · 切回聊天时已在屏幕上的消息不自动回复")
+            return
         marker = (chat, newest.text)
         if marker == getattr(self, "_auto_last_key", None):
             return
         import autoreply
+        if not verdict:
+            _log("自动回复 · 判断层不可用，按首条候选继续（风险阈值本次不生效）")
         decision = autoreply.plan(
             cfg, app_key=app.key, chat_title=chat,
             risk=(verdict or {}).get("risk"),
@@ -1381,7 +1393,17 @@ class HudController(NSObject):
         if not decision.fill:
             _log(f"自动回复跳过 · {decision.reason}")
             return
-        text = next((row.get("text") for row in (ranked or []) if row.get("text")), "")
+        # payload 形如 [(slot, tone, [{"text","prob"}, ...]), ...]（见 _payload_from_gen）。
+        # 自动回复固定取「候选第一条」：第一个话术组的第一条（排序已在组内做过），
+        # 与面板上用户看到的第一行一致。
+        text = ""
+        for _slot, _tone, items in (ranked or []):
+            for item in items:
+                if item.get("text"):
+                    text = item["text"]
+                    break
+            if text:
+                break
         if not text:
             return
         evt = threading.Event()
@@ -1402,9 +1424,13 @@ class HudController(NSObject):
         try:
             self._auto_do(text, chat, do_send, evt)
         except Exception as e:                      # noqa: BLE001 — never kill the worker silently
-            _log(f"自动回复异常 · {type(e).__name__}")
+            _log(f"自动回复异常 · {type(e).__name__}: {e}")
             self._push("applyError:", "自动回复异常，已停止")
-            self._auto_cancel()
+        finally:
+            lock = getattr(self, "_auto_lock", None)
+            if lock is not None:
+                with lock:
+                    self._auto = None
 
     @objc.python_method
     def _auto_do(self, text, chat, do_send, evt):
@@ -1423,7 +1449,8 @@ class HudController(NSObject):
         if getattr(self, "_reply_key", None) and self._reply_key[1] != chat:
             self._auto_cancel("会话已切换")
             return
-        ok, reason = wechat_auto.fill(text, win, rect)
+        known = tuple(m.text for m in ((getattr(self, "_last_full", None) or {}).get("messages") or []))
+        ok, reason = wechat_auto.fill(text, win, rect, known=known)
         if evt.is_set():
             return
         if not ok:
@@ -1450,7 +1477,7 @@ class HudController(NSObject):
         if app is None or app.key != "wechat":
             self._auto_cancel("聊天应用不在前台")
             return
-        ok, reason = wechat_auto.send(win, rect, text)
+        ok, reason = wechat_auto.send(win, rect, text, known=known)
         if ok:
             self._auto_last_send = time.time()
             self._auto_failures = 0
@@ -1918,6 +1945,8 @@ class HudController(NSObject):
         self._app = app
         self._auto_cancel()
         self._auto_last_key = None
+        self._auto_first = True
+        self._auto_suppress_text = None
         if app is not None and getattr(self, "_cal_app_key", None) != app.key:
             # Regions are per app: swap before the first read of this app's window.
             self._load_calibration(app.key)
@@ -2313,6 +2342,9 @@ class HudController(NSObject):
                 self.last_seen = newest.text
                 self.last_change_ts = now
                 self._auto_cancel("新消息到达")
+                if getattr(self, "_auto_first", False):
+                    self._auto_first = False
+                    self._auto_suppress_text = newest.text
                 # only on arrival: this function runs every second, and a per-tick line would
                 # bury the timing that matters
                 t = res.get("timing_ms") or {}
@@ -2607,6 +2639,10 @@ class HudController(NSObject):
         self._auto_failures = 0
         self._auto_paused = False
         self._auto_last_key = None
+        # 启动/切回聊天时屏幕上已经存在的消息不自动回复：只有「亲眼看着到达」的
+        # 下一条才会触发，避免一打开应用就替旧消息回话。
+        self._auto_first = True
+        self._auto_suppress_text = None
         self._fingerprint = None
         self._next_read_ts = 0
         self._push_reply("applyWaiting:", None, self._reply_epoch)
@@ -2746,8 +2782,13 @@ class HudController(NSObject):
         _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
              f" · 从分析开始到候选上屏")
         self._push("applyCandidates:", ranked)
-        if verdict and ranked:
-            self._auto_prepare(newest, verdict, ranked)
+        if ranked:
+            # 判断层不可用时也要能自动回复（用户明确要求「第一条候选」）：risk=None
+            # 时跳过风险阈值，其它护栏（白名单/限频/倒计时/总闸）不变。
+            try:
+                self._auto_prepare(newest, verdict, ranked)
+            except Exception as e:          # noqa: BLE001 — 自动化失败不影响候选上屏
+                _log(f"自动回复接线异常 {type(e).__name__}: {e}")
 
     @objc.python_method
     def _push(self, selector: str, payload=None):

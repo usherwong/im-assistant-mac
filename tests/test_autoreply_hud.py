@@ -40,7 +40,9 @@ class AutoArmTests(unittest.TestCase):
     def arm(self, config, risk=3, ranked=None):
         with patch('autoreply.load', return_value=config):
             self.h._auto_prepare(SimpleNamespace(text='在吗'), {'risk': risk},
-                                 ranked if ranked is not None else [{'text': '在的'}, {'text': '嗯'}])
+                                 ranked if ranked is not None else
+                                 [(0, '高情商', [{'text': '在的', 'prob': .9}]),
+                                  (0, '贴吧', [{'text': '嗯', 'prob': .4}])])
 
     def test_arms_with_top_candidate_and_fill_only(self):
         self.arm(conf())
@@ -50,6 +52,16 @@ class AutoArmTests(unittest.TestCase):
         self.assertEqual(args[0], '在的')
         self.assertEqual(args[1], '家人群')
         self.assertFalse(args[2])
+
+    def test_picks_the_first_candidate_on_the_panel(self):
+        self.arm(conf(), ranked=[(0, 'A', [{'text': '第一条', 'prob': .2}]),
+                                 (1, 'B', [{'text': '第二条', 'prob': .8}])])
+        self.assertEqual(self.h._auto['text'], '第一条')
+
+    def test_works_without_a_verdict(self):
+        # 判断层挂掉（TypeSafe 超时/本地模型未下载）时仍然按首条候选自动回复
+        self.arm(conf(), risk=None)
+        self.assertEqual(self.h._auto['text'], '在的')
 
     def test_auto_send_flag_is_forwarded(self):
         self.arm(conf(auto_send=True))
@@ -74,6 +86,13 @@ class AutoArmTests(unittest.TestCase):
         self.h._auto_paused = True
         self.arm(conf())
         self.assertIsNone(self.h._auto)
+
+    def test_first_message_seen_after_switching_is_never_answered(self):
+        # 启动/切回聊天时屏幕上已有的消息：只记录，不自动回复
+        self.h._auto_suppress_text = '在吗'
+        self.arm(conf())
+        self.assertIsNone(self.h._auto)
+        self.h._auto_run.assert_not_called()
 
     def test_same_message_is_armed_once(self):
         self.arm(conf())

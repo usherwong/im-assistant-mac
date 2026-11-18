@@ -82,6 +82,10 @@ class PlanTests(unittest.TestCase):
     def test_empty_allowlist_never_fires(self):
         self.assertFalse(self.plan(cfg(allowlist=())).fill)
 
+    def test_title_matches_after_trimming(self):
+        self.assertTrue(self.plan(cfg(allowlist=('File Transfer',)),
+                                  chat_title=' File Transfer ').fill)
+
     def test_unknown_chat_skipped(self):
         self.assertFalse(self.plan(cfg(), chat_title='陌生群').fill)
 

@@ -41,11 +41,16 @@ def _number(raw: str | None, default: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def title_key(text: str | None) -> str:
+    """Whitelist key: OCR pads/splits titles, so collapse whitespace and trim."""
+    return " ".join((text or "").split())
+
+
 def parse_allowlist(raw: str | None) -> tuple[str, ...]:
     """'标题A|标题B' → tuple. 空项与超长项丢弃；标题里的 `|` 无法区分，不进白名单。"""
     out = []
     for part in (raw or "").split("|"):
-        title = part.strip()
+        title = title_key(part)
         if not title or len(title) > MAX_TITLE:
             continue
         if title not in out:
@@ -106,9 +111,10 @@ def plan(config: Config, *, app_key: str, chat_title: str, risk: float | None,
         return Plan(reason="自动回复目前只覆盖微信", config=config)
     if not config.synthetic:
         return Plan(reason="合成事件总闸未开启（JEV_SYNTHETIC_INPUT）", config=config)
-    if not (chat_title or "").strip():
+    title = title_key(chat_title)
+    if not title:
         return Plan(reason="会话标题为空，无法核对白名单", config=config)
-    if chat_title not in config.allowlist:
+    if title not in config.allowlist:
         return Plan(reason="会话不在自动回复白名单", config=config)
     if risk is not None and risk > config.max_risk:
         return Plan(reason=f"风险 {risk:.0f} 高于阈值 {config.max_risk}", config=config)
@@ -119,11 +125,11 @@ def plan(config: Config, *, app_key: str, chat_title: str, risk: float | None,
 
 
 def with_allowlist(config: Config, title: str) -> Config:
-    title = (title or "").strip()
+    title = title_key(title)
     if not title or title in config.allowlist or "|" in title:
         return config
     return replace(config, allowlist=config.allowlist + (title,))
 
 
 def without_allowlist(config: Config, title: str) -> Config:
-    return replace(config, allowlist=tuple(t for t in config.allowlist if t != (title or "").strip()))
+    return replace(config, allowlist=tuple(t for t in config.allowlist if t != title_key(title)))

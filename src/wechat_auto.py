@@ -25,6 +25,13 @@ import perception
 
 SEND_RE = re.compile(r"^\s*(发送|Send)\b|^\s*发送[（(]?", re.I)
 MIN_INPUT_TEXT = 2
+# 输入区里可能出现、但不属于「草稿」的 UI 文案：发送按钮、占位提示。
+PLACEHOLDERS = {"发消息", "输入消息", "按住 说话", "按住说话", "语音输入文字",
+                "长按触控板语音输入", "长按触控板 语音输入",
+                "Write a message...", "Write a message…", "Write a message"}
+# 微信 4.2.0 的输入框空着时显示的是「长按触控板语音输入」提示（灰色），OCR 会把它
+# 当成草稿——自动填入因此永远拒绝。按住/长按 + 说话/语音输入 一律按占位提示处理。
+PLACEHOLDER_RE = re.compile(r"^(?:按住|长按).{0,8}(?:说话|语音输入)")
 CLICK_SETTLE_S = 0.12
 PASTE_SETTLE_S = 0.30
 
@@ -111,8 +118,34 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
+def _ui_text(text: str) -> bool:
+    """Composer labels that are not a draft: the send button and the placeholder."""
+    stripped = text.strip()
+    return (bool(SEND_RE.search(stripped)) or stripped in PLACEHOLDERS
+            or bool(PLACEHOLDER_RE.search(stripped)))
+
+
 def input_text(win: dict, rect) -> str:
-    return "".join(b.text for b in sorted(_ocr(win, rect), key=lambda b: -b.y))
+    """Text the user actually typed. The send button sits inside the auto-detected
+    composer region on WeChat 4.2.0, and reading it as a draft blocks every auto fill."""
+    return "".join(b.text for b in sorted(_ocr(win, rect), key=lambda b: -b.y)
+                   if not _ui_text(b.text))
+
+
+def _without_known(text: str, known) -> str:
+    """Drop chat text that the auto-detected region accidentally included.
+
+    The automatic composer outline sometimes starts a little above the real input box
+    (measured: 0.684 vs 0.776 of the window), so the last message bubble lands in the
+    "draft" read and every auto fill refuses. The HUD already knows the recent message
+    texts from the same capture — anything that is one of them is not a draft.
+    """
+    core = _norm(text)
+    for item in known or ():
+        key = _norm(item)
+        if key and len(key) >= 2:
+            core = core.replace(key, "")
+    return core
 
 
 def _matches(candidate: str, seen: str) -> bool:
@@ -130,14 +163,14 @@ def _matches(candidate: str, seen: str) -> bool:
 
 # ------------------------------------------------------------------ 填入 / 发送
 
-def fill(text: str, win: dict, rect) -> tuple[bool, str]:
+def fill(text: str, win: dict, rect, known=()) -> tuple[bool, str]:
     if not enabled():
         return False, REASON_GATE
     if not text or rect is None:
         return False, REASON_NO_RECT
-    existing = input_text(win, rect)
-    if _norm(existing):
-        return False, REASON_DRAFT
+    existing = _without_known(input_text(win, rect), known)
+    if existing:
+        return False, f"{REASON_DRAFT}（{len(existing)} 字）"
     x, y, w, h = (float(v) for v in rect)
     if not click((x + w / 2, y + h / 2)):
         return False, "定位输入区失败"
@@ -167,22 +200,21 @@ def _send_button(win: dict, rect) -> tuple[float, float] | None:
     x, y, w, h = (float(v) for v in rect)
     best = None
     for b in blocks:
-        if not SEND_RE.search(b.text) or len(b.text.strip()) > 10:
+        if not SEND_RE.search(b.text) or len(b.text.strip()) > 6:
             continue
         # Vision block → window-normalized top-origin, then screen points
         bx = win["x"] + b.x * win["w"]
         by = win["y"] + (1.0 - b.y - b.h) * win["h"]
         bw, bh = b.w * win["w"], b.h * win["h"]
-        if bx < x + w - 4:
-            continue                       # must start at/after the composer's right edge
-        # (校准输入区要求排除发送按钮；用起点而不是中心判定，避免把紧贴右缘的正文当按钮)
+        if bx < x + w * .75 - 4:
+            continue                       # 右下角区域；短文案（≤6 字）再排除正文气泡
         if not (y - 2 * h <= by + bh / 2 <= y + 2.2 * h):
             continue                       # a menu item elsewhere in the window
         best = (bx + bw / 2, by + bh / 2)
     return best
 
 
-def send(win: dict, rect, candidate: str = "") -> tuple[bool, str]:
+def send(win: dict, rect, candidate: str = "", known=()) -> tuple[bool, str]:
     """Click 发送, or fall back to Return when the button is drawn without text.
 
     WeChat 4.x normally renders a 「发送(S)」 label, but some builds/themes draw an icon
@@ -205,6 +237,9 @@ def send(win: dict, rect, candidate: str = "") -> tuple[bool, str]:
         return False, REASON_NO_SEND
     time.sleep(0.45)
     left = input_text(win, rect)
-    if _norm(left):
+    core = _without_known(left, known)
+    # 成功的判据是候选内容不在了，而不是「一个字都没有」：自动识别出的输入区可能
+    # 带出占位提示/边缘 UI 文案（已过滤），或残留 1–3 个字的界面字符。
+    if core and (len(core) >= 4 or (candidate and _matches(candidate, left))):
         return False, REASON_SEND_FAILED
     return True, how

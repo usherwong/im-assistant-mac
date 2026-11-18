@@ -49,6 +49,27 @@ class MatchTests(unittest.TestCase):
         self.assertFalse(wechat_auto._matches('', '好的'))
 
 
+class InputTextTests(unittest.TestCase):
+    def block(self, text, top):
+        return TextBlock(text, 1.0, .3, 1 - top - .03, .4, .03)
+
+    def test_send_button_and_placeholder_are_not_a_draft(self):
+        with patch.object(wechat_auto, '_ocr',
+                          return_value=[self.block('发送', .93), self.block('发消息', .90)]):
+            self.assertEqual(wechat_auto.input_text(WIN, (100, 560, 300, 26)), '')
+
+    def test_trackpad_voice_hint_is_not_a_draft(self):
+        with patch.object(wechat_auto, '_ocr',
+                          return_value=[self.block('长按触控板语音输入', .88),
+                                        self.block('发送', .93)]):
+            self.assertEqual(wechat_auto.input_text(WIN, (100, 560, 300, 26)), '')
+
+    def test_real_draft_survives_the_filter(self):
+        with patch.object(wechat_auto, '_ocr',
+                          return_value=[self.block('发送', .93), self.block('好的我下午到', .90)]):
+            self.assertEqual(wechat_auto.input_text(WIN, (100, 560, 300, 26)), '好的我下午到')
+
+
 class SendButtonTests(unittest.TestCase):
     def block(self, text, sx, sy, sw=40, sh=20):
         # screen points → Vision 归一化（y 底部原点）
@@ -64,6 +85,13 @@ class SendButtonTests(unittest.TestCase):
         with patch.object(wechat_auto, '_ocr', return_value=blocks):
             self.assertIsNone(wechat_auto._send_button(WIN, (100, 560, 300, 26)))
 
+    def test_button_inside_an_auto_detected_composer_is_found(self):
+        # 自动识别出的输入区把发送按钮也包进去了（微信 4.2.0 实测）：仍要能找到。
+        blocks = [self.block('发送', 820, 565)]
+        with patch.object(wechat_auto, '_ocr', return_value=blocks):
+            self.assertEqual(
+                wechat_auto._send_button(WIN, (310, 560, 555, 120)), (840, 575))
+
     def test_left_side_and_far_away_are_ignored(self):
         blocks = [self.block('发送', 40, 565), self.block('发送', 410, 200)]
         with patch.object(wechat_auto, '_ocr', return_value=blocks):
@@ -71,12 +99,25 @@ class SendButtonTests(unittest.TestCase):
 
 
 class FillTests(unittest.TestCase):
+    def test_known_message_text_in_the_region_is_not_a_draft(self):
+        board = Mock()
+        board.stringForType_.return_value = None
+        with patch.object(wechat_auto, 'enabled', return_value=True), \
+             patch.object(wechat_auto, 'input_text', side_effect=['人呢', '候选内容']), \
+             patch.object(wechat_auto, 'click', return_value=True), \
+             patch.object(wechat_auto, 'cmd_v', return_value=True), \
+             patch.object(wechat_auto.AppKit, 'NSPasteboard') as pb:
+            pb.generalPasteboard.return_value = board
+            ok, reason = wechat_auto.fill('候选内容', WIN, (100, 560, 300, 26),
+                                          known=('在吗', '人呢'))
+        self.assertTrue(ok, reason)
+
     def test_existing_draft_stops_fill(self):
         with patch.object(wechat_auto, 'enabled', return_value=True), \
              patch.object(wechat_auto, 'input_text', return_value='我自己写的草稿'):
             ok, reason = wechat_auto.fill('候选', WIN, (100, 560, 300, 26))
         self.assertFalse(ok)
-        self.assertEqual(reason, wechat_auto.REASON_DRAFT)
+        self.assertIn(wechat_auto.REASON_DRAFT, reason)
 
     def test_success_verifies_by_readback_and_restores_clipboard(self):
         board = Mock()
@@ -115,6 +156,14 @@ class SendTests(unittest.TestCase):
             ok, reason = wechat_auto.send(WIN, (100, 560, 300, 26), '候选')
         self.assertTrue(ok, reason)
         click.assert_called_once_with((430, 575))
+
+    def test_short_ui_leftover_does_not_fake_a_failure(self):
+        with patch.object(wechat_auto, 'enabled', return_value=True), \
+             patch.object(wechat_auto, '_send_button', return_value=(430, 575)), \
+             patch.object(wechat_auto, 'click', return_value=True), \
+             patch.object(wechat_auto, 'input_text', return_value='发'):
+            ok, reason = wechat_auto.send(WIN, (100, 560, 300, 26), '候选内容')
+        self.assertTrue(ok, reason)
 
     def test_text_still_in_composer_means_not_sent(self):
         with patch.object(wechat_auto, 'enabled', return_value=True), \
