@@ -258,6 +258,72 @@ class SettingsController(NSObject):
         item.setView_(panel)
         self.tabs.addTabViewItem_(item)
 
+        # ── 自动化（自动回复）────────────────────────────────────────────
+        item = A.NSTabViewItem.alloc().initWithIdentifier_("AUTO")
+        item.setLabel_("自动化")
+        panel = A.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 690, 300))
+        group = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+        group.setFrame_(NSMakeRect(12, 96, 666, 192))
+        panel.addSubview_(group)
+        heading = self.label(panel, "自动回复（默认关闭 · 高风险）", 26, 258, 500, 20, 13)
+        heading.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.label(panel,
+                   "微信 4.2.0 的输入框无法用辅助功能写入，自动填写/发送只能合成鼠标键盘事件；"
+                   "上游记录过合成事件导致账号被强制登出（#139）。",
+                   26, 226, 630, 34, 11, PALETTE["muted"])
+        gate_raw = userconfig.get("JEV_SYNTHETIC_INPUT")
+        gate_on = (gate_raw or "").strip().lower() in ("1", "true", "yes", "on")
+        gate = self.label(panel,
+                          "合成事件总闸：" + ("已开启" if gate_on else "未开启 —— 需在 env 里加 JEV_SYNTHETIC_INPUT=1"),
+                          26, 200, 630, 18, 11,
+                          PALETTE["green"] if gate_on else PALETTE["amber"])
+
+        self.auto_fill_switch = A.NSSwitch.alloc().initWithFrame_(NSMakeRect(600, 168, 46, 28))
+        self.auto_fill_switch.setAccessibilityLabel_("自动填入候选")
+        enabled_fill = (userconfig.get("JEV_AUTO_FILL") or "").strip().lower() in ("1", "true", "yes", "on")
+        self.auto_fill_switch.setState_(A.NSOnState if enabled_fill else A.NSOffState)
+        panel.addSubview_(self.auto_fill_switch)
+        title = self.label(panel, "自动填入候选", 26, 174, 420, 20, 13)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.label(panel, "分析完成后把排序第一条填进输入框（不发送）", 26, 156, 560, 18, 11, PALETTE["muted"])
+
+        self.auto_send_switch = A.NSSwitch.alloc().initWithFrame_(NSMakeRect(600, 124, 46, 28))
+        self.auto_send_switch.setAccessibilityLabel_("自动发送（倒计时）")
+        enabled_send = (userconfig.get("JEV_AUTO_SEND") or "").strip().lower() in ("1", "true", "yes", "on")
+        self.auto_send_switch.setState_(A.NSOnState if enabled_send else A.NSOffState)
+        panel.addSubview_(self.auto_send_switch)
+        title = self.label(panel, "自动发送（倒计时）", 26, 130, 420, 20, 13)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.label(panel, "需要先开启自动填入；倒计时内切走/来新消息/暂停都会取消", 26, 112, 560, 18, 11, PALETTE["muted"])
+
+        self.label(panel, "倒计时（秒）", 26, 74, 110, 20, 12, PALETTE["text"])
+        self.auto_delay = A.NSTextField.alloc().initWithFrame_(NSMakeRect(140, 72, 60, 26))
+        self.auto_delay.setStringValue_(userconfig.get("JEV_AUTO_DELAY") or "5")
+        self.style_field(self.auto_delay)
+        self.auto_delay.setAlignment_(A.NSTextAlignmentCenter)
+        self.auto_delay.setDelegate_(self)
+        self.auto_delay.setAccessibilityLabel_("自动发送倒计时秒数，0 到 60")
+        panel.addSubview_(self.auto_delay)
+        self.label(panel, "白名单（| 分隔，空 = 谁都不回）", 240, 74, 260, 20, 12, PALETTE["text"])
+        self.auto_allowlist = A.NSTextField.alloc().initWithFrame_(NSMakeRect(240, 72, 404, 26))
+        self.auto_allowlist.setStringValue_(userconfig.get("JEV_AUTO_ALLOWLIST") or "")
+        self.style_field(self.auto_allowlist)
+        self.auto_allowlist.setDelegate_(self)
+        self.auto_allowlist.setPlaceholderString_("文件传输助手|家人群")
+        self.auto_allowlist.setAccessibilityLabel_("自动回复白名单，用竖线分隔会话标题")
+        panel.addSubview_(self.auto_allowlist)
+        self.label(panel, "风险阈值与限频仍在 env（JEV_AUTO_MAX_RISK / JEV_AUTO_MIN_GAP）；"
+                          "菜单栏 J 也保留同样的开关与「暂停自动回复」。",
+                   26, 20, 630, 34, 10, PALETTE["muted"])
+        self.initial.update({
+            "JEV_AUTO_FILL": "1" if enabled_fill else "0",
+            "JEV_AUTO_SEND": "1" if enabled_send else "0",
+            "JEV_AUTO_DELAY": str(self.auto_delay.stringValue()).strip(),
+            "JEV_AUTO_ALLOWLIST": str(self.auto_allowlist.stringValue()).strip(),
+        })
+        item.setView_(panel)
+        self.tabs.addTabViewItem_(item)
+
     @objc.python_method
     def refresh_contexts(self):
         drafts = self.changed_backgrounds()
@@ -493,6 +559,11 @@ class SettingsController(NSObject):
             values["JEV_CONTEXT_MESSAGES"] = str(self.context_count.stringValue()).strip()
         if self.candidate_count.isEnabled():
             values["JEV_CANDIDATES_PER_TONE"] = str(self.candidate_count.titleOfSelectedItem())
+        if hasattr(self, "auto_fill_switch"):
+            values["JEV_AUTO_FILL"] = "1" if self.auto_fill_switch.state() == A.NSOnState else "0"
+            values["JEV_AUTO_SEND"] = "1" if self.auto_send_switch.state() == A.NSOnState else "0"
+            values["JEV_AUTO_DELAY"] = str(self.auto_delay.stringValue()).strip()
+            values["JEV_AUTO_ALLOWLIST"] = str(self.auto_allowlist.stringValue()).strip()
         return {k: v for k, v in values.items() if v != self.initial[k]}
 
     def controlTextDidChange_(self, notification):
@@ -530,6 +601,13 @@ class SettingsController(NSObject):
             for key, value in changes.items():
                 if key.endswith("_BASE_URL") and value:
                     config.validate_endpoint(value)
+            if "JEV_AUTO_DELAY" in changes:
+                try:
+                    delay = float(changes["JEV_AUTO_DELAY"])
+                except ValueError:
+                    raise ValueError("倒计时必须是 0–60 之间的秒数。")
+                if not 0 <= delay <= 60:
+                    raise ValueError("倒计时必须是 0–60 之间的秒数。")
             if changes:
                 self.original = config.write_settings(self.path, self.original, changes)
         except ValueError as e:
@@ -540,6 +618,12 @@ class SettingsController(NSObject):
             return
         self.initial.update(changes)
         self.file_values.update(changes)
+        auto_changes = {k: v for k, v in changes.items() if k.startswith("JEV_AUTO_")}
+        for key, value in auto_changes.items():
+            userconfig.session_override(key, value)
+        if auto_changes and self.hud:
+            self.hud._auto_cancel()
+            self.hud._refresh_auto_menu()
         context_changes = {k: v for k, v in changes.items() if k in ("JEV_HISTORY", "JEV_CONTEXT_MESSAGES")}
         for key, value in context_changes.items():
             userconfig.session_override(key, value)
