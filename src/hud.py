@@ -1330,6 +1330,9 @@ class HudController(NSObject):
             if item is not None:
                 item.setState_(AppKit.NSOnState if on else AppKit.NSOffState)
 
+    def refreshAutoMenu_(self, _payload):
+        self._refresh_auto_menu()
+
     @objc.python_method
     def _auto_cancel(self, reason: str = ""):
         evt = getattr(self, "_auto_cancel_evt", None)
@@ -1347,7 +1350,8 @@ class HudController(NSObject):
         self._auto_failures = getattr(self, "_auto_failures", 0) + 1
         if self._auto_failures >= 2:
             self._auto_paused = True
-            self._refresh_auto_menu()
+            # 菜单是 AppKit 对象：worker 线程只发消息，刷新留在主线程。
+            self._push("refreshAutoMenu:", None)
             _log("自动回复连续失败 2 次，已暂停（菜单栏可恢复）")
             self._push("applyStatus:", "自动回复连续失败，已暂停 · 菜单栏 J 可恢复")
 
