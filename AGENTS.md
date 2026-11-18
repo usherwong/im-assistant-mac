@@ -4,7 +4,7 @@
 
 ## 目录与命令
 
-- `src/perception.py` 抓图+OCR+抽消息（微信专用窗口选择器 `find_wechat_window` + 通用 `find_window(profile)`）；`src/apps/` 聊天 App 适配器层（base.py 协议、profiles.py 渠道配置、capture_app.py 转调 perception/fill、telegram_app.py Telegram 渠道、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/ax_input.py` 原生 App 的 AX 写入/发送（Telegram）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 微信辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
+- `src/perception.py` 抓图+OCR+抽消息（微信专用窗口选择器 `find_wechat_window` + 通用 `find_window(profile)`）；`src/apps/` 聊天 App 适配器层（base.py 协议、profiles.py 渠道配置、capture_app.py 转调 perception/fill、telegram_app.py Telegram 渠道、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/ax_input.py` 原生 App 的 AX 写入/发送（Telegram）；`src/autoreply.py` 自动回复决策（纯函数）；`src/wechat_auto.py` 微信自动填入/发送（合成事件，唯一允许 CGEvent 的文件）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 微信辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
 - 启动：`./start.command`（用户平时的方式；`Ctrl+C` 退出）。没有正式测试套件，分层自测：
 
   ```bash
@@ -23,6 +23,7 @@
 
 - **渠道 profile**：`src/apps/profiles.py` 是渠道常量的唯一来源（bundle id、窗口尺寸门槛、布局比例、UI 噪音、标题选取规则、校准 env 键）。微信的 profile 直接引用 perception 顶部常量，**别在别处复制一份**；Telegram 的 profile 来自 2026-11-18 探测，读走 OCR、写走 AX（见下条）。
 - **Telegram 读走 OCR、写走 AX**：`ru.keepcoder.Telegram` 的 `AXList` 子节点恒为 0，正文不在无障碍树里——读消息必须截图 + Vision OCR（`requires_calibration=True`，首次要求手动校准）。输入框是 `AXTextArea`、发送是 `AXButton` 的 `AXPress`，**这条渠道不许引入 CGEvent 合成事件或剪贴板粘贴**；`ax_input.py` 是唯一写入实现。已知 API 行为：`AXUIElementSetAttributeValue` 返回 -25200 时值**可能已经写入**，成功与否只认读回；发送按钮只在输入框有内容时出现且标签随语言变，定位靠「输入框同一行、最右侧的可用按钮」+ 标签提示。
+- **自动回复是唯一允许 CGEvent 的路径**：`wechat_auto.py` 合成鼠标/键盘，只在 `JEV_SYNTHETIC_INPUT=1` 时工作，且必须过 `autoreply.plan`（白名单、风险阈值、限频）。**别把 CGEvent 挪进 fill.py 或任何默认路径**：上游 #139 就是合成填入导致微信强制登出。每一步写完必须读回复核（粘贴后 OCR 确认输入框内容、发送后确认输入框已清空），失败即停、不重试；连续 2 次失败自动暂停。默认全关，白名单为空 = 谁都不回。
 - **纯只读**：不注入、不 hook、不解密聊天数据。「填入」是唯一写动作：AX 写入优先；目标应用不提供 AX 输入控件时，fallback 是**复制到剪贴板 + 用户自己 ⌘V**（#139：`visual_fill` 的合成事件被截图型应用的账号风控识别为自动化，触发强制登出，已对该路径停用；合成事件出身可查，模拟平滑轨迹没用）——**别改回合成事件（visual_fill）也别改成模拟 Cmd+V**（前者触发风控见 #139；后者切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
 - **轮询**：定时器 0.25s 触发，`_next_read_ts` 门控分三档——静止（指纹相同）跳过 OCR、0.25s 一跳；**变化后先 0.45s×3 跳**（burst 下一条尽快被发现），持续再动才回 1s。**未变化帧仍要跑停稳判定**（复用 `_last_full` 缓存），否则分析永远不触发。停稳 `SETTLE_S=1.2` 是防刷屏**上限不能删**；连续 `STABLE_READS` 跳安静最早 `EARLY_SETTLE_S` 可提前开闸。最小分析间隔 `MIN_GAP_S=2.0` 不能删（预判命中路径本就免冷却）。
 - **预判+生成都早跑**（`_prejudge_loop` / `_pregen_loop`，同款 latest-wins 槽位）：消息一出现两个半边同时起跑，停稳门只消费「文本仍是最新」的结果；生成结果还要话术匹配（`_take_pregen`），迟到/过期结果由 `applyCandidates_` 的话术守卫挡掉。候选**先上屏再排序**（prob=None 显示「排序中」，`_rank_payload` 完成后原位重排）。
@@ -48,5 +49,6 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 判断模型冷启动 10–20s 是已知问题（见 issue #1 预热方案）；启动后第一条慢是正常现象，别误判成回归。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+- **自动回复的坑**：发送按钮定位靠「输入框右缘之外、同一行、文本以『发送/Send』开头且 ≤10 字」——校准输入区时必须排除发送按钮，否则按钮被当成输入内容；按钮取不到文字时回退回车，复核失败即停。倒计时期间状态行会被读屏循环覆盖（可接受，真正的取消靠事件）；`_auto` 只是 UI 状态，取消一律走 `_auto_cancel_evt`，别只清字典。剪贴板在填入时被临时占用并在 finally 里还原；日志只记成功/失败与原因，不记会话名和正文。
 - **Telegram 的坑**：主窗口关闭时 `AXWindows` 读到 0（HUD 只在前台分析，正常路径不受影响）；窗口标题是 macOS 标题栏文本（`Telegram @ 账号`），会话标题在下一行——校准路径用 `title_pick="nearest"` 取离消息区最近的一行，否则会把账号标题当成会话名。CGWindow 标题需要屏幕录制权限，没有授权时 `find_window` 会把窗口全部跳过。Telegram 默认窗口 480×616 点，比微信的 500×400 门槛窄，故 profile 自带 `min_window_w=380`。
 - **workflow 文件里步骤级 `env:` 键不能只留注释**：纯注释子节点解析为 `null`，GitHub 会以 `Invalid workflow file` 拒载整个 workflow（#137 评审拦下的）。pullfrog.yml 这类 dispatch 型 workflow 的改动 **PR 内 CI 绿验证不了**（定义取自 master），GitHub 侧的信号是 push 后 0 秒失败的占位 run；真正验证只能等合并后由下一个 dispatch 完成。

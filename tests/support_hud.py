@@ -33,7 +33,8 @@ def hud_harness():
              '_context_changed', 'save_background', 'configure_context', 'clear_history',
              '_regen_work', '_regenerate_work', 'regenerateReply_', '_rank_payload', '_payload_from_gen',
              'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_',
-             '_load_calibration', '_parse_calibration'}
+             '_load_calibration', '_parse_calibration',
+             '_auto_cancel', '_auto_prepare', '_auto_cfg', '_auto_chat_title'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []

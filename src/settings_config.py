@@ -30,6 +30,11 @@ ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z_0-9]*)(\s*=\s*)(
 # _<KEY> suffix (JEV_MESSAGE_REGION_TELEGRAM) so calibrating one app cannot overwrite
 # another's selection.
 REGION_KEY = re.compile(r"^JEV_(?:MESSAGE|INPUT)_REGION(?:_[A-Z0-9_]+)?$")
+# 自动回复开关由菜单栏写回用户 env（autoreply.py 读同一批键）。
+AUTO_KEYS = {
+    "JEV_AUTO_FILL", "JEV_AUTO_SEND", "JEV_AUTO_DELAY", "JEV_AUTO_ALLOWLIST",
+    "JEV_AUTO_MAX_RISK", "JEV_AUTO_MIN_GAP", "JEV_SYNTHETIC_INPUT", "JEV_AUTO_ACK",
+}
 
 
 def read_document(path: Path) -> str:
@@ -48,6 +53,7 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
     allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {
         "JUDGE_BACKEND", "JEV_HISTORY", "JEV_CONTEXT_MESSAGES",
         "JEV_MESSAGE_REGION", "JEV_INPUT_REGION", "JEV_CANDIDATES_PER_TONE"}
+    allowed |= AUTO_KEYS
     if not all(k in allowed or REGION_KEY.match(k) for k in changes):
         raise ValueError("不支持的配置项。")
     for value in changes.values():

@@ -219,6 +219,16 @@ class HudController(NSObject):
             _log("上下文条数配置无效，使用默认值 20")
         self._observed_messages = None
         self._observed_offset = 0
+        # 自动回复（opt-in，见 autoreply.py / wechat_auto.py）：默认关，白名单 + 限频 +
+        # 倒计时 + 连续失败熔断。合成事件总闸在 wechat_auto 里单独检查。
+        self._auto = None
+        self._auto_lock = threading.Lock()
+        self._auto_cancel_evt = threading.Event()
+        self._auto_cancel_evt.set()
+        self._auto_last_send = 0.0
+        self._auto_failures = 0
+        self._auto_paused = False
+        self._auto_last_key = None
         self.conversations = None
         try:
             self.conversations = chat_context.Conversations()
@@ -747,6 +757,11 @@ class HudController(NSObject):
             ("模型设置…", "openSettings:", ","),
             ("校准区域…", "calibrateMessages:", ""),
             ("恢复自动识别区域", "clearCalibration:", ""),
+            ("自动填入候选", "toggleAutoFill:", ""),
+            ("自动发送（倒计时）", "toggleAutoSend:", ""),
+            ("暂停自动回复", "toggleAutoPause:", ""),
+            ("加入自动回复白名单", "autoAllowlistAdd:", ""),
+            ("清空自动回复白名单", "autoAllowlistClear:", ""),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -756,10 +771,15 @@ class HudController(NSObject):
         self.pause_item = menu.itemArray()[1]
         self.boxes_item = menu.itemArray()[2]
         self.always_on_top_item = menu.itemArray()[3]
+        by_title = {item.title(): item for item in menu.itemArray()}
+        self.auto_fill_item = by_title["自动填入候选"]
+        self.auto_send_item = by_title["自动发送（倒计时）"]
+        self.pause_auto_item = by_title["暂停自动回复"]
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
         self.always_on_top_item.setState_(
             AppKit.NSOnState if self._always_on_top else AppKit.NSOffState)
+        self._refresh_auto_menu()
         self.status_item.setMenu_(menu)
 
     @objc.python_method
@@ -1226,6 +1246,7 @@ class HudController(NSObject):
         text = self.cand_texts[sender.tag()] if 0 <= sender.tag() < len(self.cand_texts) else None
         if not text:
             return
+        self._auto_cancel("手动复制")
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
@@ -1243,6 +1264,7 @@ class HudController(NSObject):
         # The status line is painted before the call because writing into the chat app
         # takes a beat; the click should look instant even though the write has not
         # happened yet.
+        self._auto_cancel("手动填入")
         self._render("status", "填入中…", PALETTE["muted"])
         self.panel.displayIfNeeded()
         app = self._app
@@ -1270,6 +1292,264 @@ class HudController(NSObject):
             self._render("status", reason, PALETTE["green"])
         else:
             self._render("status", f"填入失败：{reason}", PALETTE["red"])
+
+    # ---------------------------------------------------------------- 自动回复
+    @objc.python_method
+    def _auto_cfg(self):
+        import autoreply
+        return autoreply.load()
+
+    @objc.python_method
+    def _auto_set(self, key, value) -> bool:
+        from settings_config import read_document, write_settings
+        path = userconfig.env_files()[0]
+        try:
+            write_settings(path, read_document(path), {key: value})
+            return True
+        except (ValueError, OSError) as e:
+            self._render("status", f"保存失败：{e}", PALETTE["red"])
+            return False
+
+    @objc.python_method
+    def _auto_chat_title(self) -> str:
+        key = getattr(self, "_reply_key", None)
+        if key:
+            return key[1] or ""
+        return ((getattr(self, "_last_full", None) or {}).get("chat_title") or "")
+
+    @objc.python_method
+    def _refresh_auto_menu(self):
+        """Menu check marks mirror the env; failures to read are not worth breaking over."""
+        try:
+            cfg = self._auto_cfg()
+        except Exception:
+            return
+        for item, on in ((getattr(self, "auto_fill_item", None), cfg.auto_fill),
+                         (getattr(self, "auto_send_item", None), cfg.auto_send),
+                         (getattr(self, "pause_auto_item", None), self._auto_paused)):
+            if item is not None:
+                item.setState_(AppKit.NSOnState if on else AppKit.NSOffState)
+
+    @objc.python_method
+    def _auto_cancel(self, reason: str = ""):
+        evt = getattr(self, "_auto_cancel_evt", None)
+        if evt is not None:
+            evt.set()
+        lock = getattr(self, "_auto_lock", None)
+        if lock is not None:
+            with lock:
+                self._auto = None
+        if reason:
+            _log(f"自动回复取消 · {reason}")
+
+    @objc.python_method
+    def _auto_failure(self):
+        self._auto_failures = getattr(self, "_auto_failures", 0) + 1
+        if self._auto_failures >= 2:
+            self._auto_paused = True
+            self._refresh_auto_menu()
+            _log("自动回复连续失败 2 次，已暂停（菜单栏可恢复）")
+            self._push("applyStatus:", "自动回复连续失败，已暂停 · 菜单栏 J 可恢复")
+
+    @objc.python_method
+    def _auto_prepare(self, newest, verdict, ranked):
+        """Called on the analysis thread once candidates are ranked. Decides + starts."""
+        try:
+            cfg = self._auto_cfg()
+        except Exception:
+            return
+        if not cfg.active or getattr(self, "_auto_paused", False):
+            return
+        app = getattr(self, "_app", None)
+        key = getattr(self, "_reply_key", None)
+        if app is None or key is None or app.key != "wechat":
+            return
+        chat = key[1] or ""
+        marker = (chat, newest.text)
+        if marker == getattr(self, "_auto_last_key", None):
+            return
+        import autoreply
+        decision = autoreply.plan(
+            cfg, app_key=app.key, chat_title=chat,
+            risk=(verdict or {}).get("risk"),
+            last_sent_at=getattr(self, "_auto_last_send", 0.0) or None,
+            now=time.time())
+        if not decision.fill:
+            _log(f"自动回复跳过 · {decision.reason}")
+            return
+        text = next((row.get("text") for row in (ranked or []) if row.get("text")), "")
+        if not text:
+            return
+        evt = threading.Event()
+        self._auto_last_key = marker
+        lock = getattr(self, "_auto_lock", None) or threading.Lock()
+        self._auto_lock = lock
+        with lock:
+            self._auto = {"text": text, "chat": chat, "send": decision.send}
+            self._auto_cancel_evt = evt
+        _log("自动回复 · 已就绪（" + ("填入+发送" if decision.send else "仅填入") + "）")
+        self._push("applyStatus:", "自动回复准备中…")
+        threading.Thread(target=self._auto_run,
+                         args=(text, chat, decision.send, evt), daemon=True).start()
+
+    @objc.python_method
+    def _auto_run(self, text, chat, do_send, evt):
+        """Worker: fill -> countdown -> send. Every step is verified; cancel wins races."""
+        try:
+            self._auto_do(text, chat, do_send, evt)
+        except Exception as e:                      # noqa: BLE001 — never kill the worker silently
+            _log(f"自动回复异常 · {type(e).__name__}")
+            self._push("applyError:", "自动回复异常，已停止")
+            self._auto_cancel()
+
+    @objc.python_method
+    def _auto_do(self, text, chat, do_send, evt):
+        import wechat_auto
+        target = getattr(self, "_input_target", None) or {}
+        win = target.get("window") or ((getattr(self, "_last_full", None) or {}).get("window"))
+        rect = target.get("rect") or target.get("visual_rect")
+        if not win or not rect:
+            _log("自动回复失败 · 没有可用的输入区位置")
+            self._push("applyStatus:", "自动回复需要先校准输入区：菜单栏 J → 校准区域…")
+            return
+        app = getattr(self, "_app", None)
+        if app is None or app.key != "wechat":
+            self._auto_cancel("聊天应用不在前台")
+            return
+        if getattr(self, "_reply_key", None) and self._reply_key[1] != chat:
+            self._auto_cancel("会话已切换")
+            return
+        ok, reason = wechat_auto.fill(text, win, rect)
+        if evt.is_set():
+            return
+        if not ok:
+            _log(f"自动填入失败 · {reason}")
+            self._push("applyStatus:", f"自动填入失败：{reason}")
+            self._auto_failure()
+            return
+        _log("自动填入成功")
+        if not do_send:
+            self._push("applyStatus:", "已自动填入（未开启自动发送）")
+            return
+        cfg = self._auto_cfg()
+        deadline = time.time() + cfg.delay
+        while True:
+            left = deadline - time.time()
+            if evt.is_set():
+                self._push("applyStatus:", "已取消自动发送（内容仍在输入框）")
+                return
+            if left <= 0:
+                break
+            self._push("applyStatus:", f"{left:.0f}s 后自动发送 · 菜单栏可暂停")
+            time.sleep(min(0.25, max(0.05, left)))
+        app = getattr(self, "_app", None)
+        if app is None or app.key != "wechat":
+            self._auto_cancel("聊天应用不在前台")
+            return
+        ok, reason = wechat_auto.send(win, rect, text)
+        if ok:
+            self._auto_last_send = time.time()
+            self._auto_failures = 0
+            _log("自动发送成功")
+            self._push("applyStatus:", "已自动发送")
+        else:
+            _log(f"自动发送失败 · {reason}")
+            self._push("applyStatus:", f"自动发送失败：{reason}")
+            self._auto_failure()
+
+    @objc.python_method
+    def _auto_warn_alert(self) -> bool:
+        """High-risk acknowledgement: the #139 evidence, said plainly, once per install."""
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("自动发送高风险提示")
+        alert.setInformativeText_(
+            "微信 4.2.0 的辅助功能树读不到输入框，自动填写/发送只能合成鼠标与键盘事件。"
+            "上游项目记录过：合成事件被微信账号风控识别，多名用户账号被强制登出"
+            "（#139，2026-09-28）。\n\n"
+            "开启后仍可随时用菜单栏「暂停自动回复」立即停止。建议先用小号或文件传输助手验证。")
+        alert.addButtonWithTitle_("取消")
+        alert.addButtonWithTitle_("我明白风险，仍要开启")
+        return alert.runModal() == 1001
+
+    @objc.python_method
+    def _require_synthetic_ok(self) -> bool:
+        cfg = self._auto_cfg()
+        if cfg.synthetic:
+            return True
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("还差一步：合成事件总闸")
+        alert.setInformativeText_(
+            "微信 4.2.0 的输入框无法通过辅助功能写入，自动填写/发送必须依赖合成事件。"
+            "总闸 `JEV_SYNTHETIC_INPUT` 目前关闭；请在配置文件里加一行 "
+            "`export JEV_SYNTHETIC_INPUT=1`（或先只用「复制」）。")
+        alert.addButtonWithTitle_("知道了")
+        alert.runModal()
+        return False
+
+    def toggleAutoFill_(self, sender):
+        cfg = self._auto_cfg()
+        if not cfg.auto_fill and not self._require_synthetic_ok():
+            return
+        if not self._auto_set("JEV_AUTO_FILL", "0" if cfg.auto_fill else "1"):
+            return
+        self._auto_cancel()
+        self._refresh_auto_menu()
+        cfg = self._auto_cfg()
+        if cfg.auto_fill:
+            note = f"自动填入已开启 · 白名单 {len(cfg.allowlist)} 个会话"
+            if not cfg.allowlist:
+                note += "（菜单栏「加入自动回复白名单」）"
+            self._render("status", note, PALETTE["green"])
+        else:
+            self._render("status", "自动填入已关闭", PALETTE["muted"])
+
+    def toggleAutoSend_(self, sender):
+        cfg = self._auto_cfg()
+        if not cfg.auto_send and not self._require_synthetic_ok():
+            return
+        if not cfg.auto_fill:
+            self._render("status", "请先开启「自动填入候选」", PALETTE["amber"])
+            return
+        if not cfg.auto_send and not cfg.acknowledged:
+            if not self._auto_warn_alert():
+                return
+            self._auto_set("JEV_AUTO_ACK", "1")
+        if not self._auto_set("JEV_AUTO_SEND", "0" if cfg.auto_send else "1"):
+            return
+        self._auto_cancel()
+        self._refresh_auto_menu()
+        if cfg.auto_send:
+            self._render("status", "自动发送已关闭（填入仍可用）", PALETTE["muted"])
+        else:
+            self._render("status", "自动发送已开启 · 填入后倒计时可取消", PALETTE["amber"])
+
+    def toggleAutoPause_(self, sender):
+        self._auto_paused = not getattr(self, "_auto_paused", False)
+        if self._auto_paused:
+            self._auto_cancel("手动暂停")
+        self._refresh_auto_menu()
+        self._render("status", "自动回复已暂停" if self._auto_paused else "自动回复已恢复",
+                     PALETTE["amber"] if self._auto_paused else PALETTE["green"])
+
+    def autoAllowlistAdd_(self, sender):
+        title = self._auto_chat_title().strip()
+        if not title:
+            self._render("status", "还没识别到会话标题，请先让面板读到一条消息", PALETTE["amber"])
+            return
+        import autoreply
+        cfg = self._auto_cfg()
+        if title in cfg.allowlist:
+            self._render("status", "当前会话已在白名单里", PALETTE["muted"])
+            return
+        if self._auto_set("JEV_AUTO_ALLOWLIST", autoreply.dump_allowlist(cfg.allowlist + (title,))):
+            self._refresh_auto_menu()
+            self._render("status", "已把当前会话加入自动回复白名单", PALETTE["green"])
+
+    def autoAllowlistClear_(self, sender):
+        if self._auto_set("JEV_AUTO_ALLOWLIST", ""):
+            self._auto_cancel()
+            self._refresh_auto_menu()
+            self._render("status", "自动回复白名单已清空（自动回复不会触发）", PALETTE["amber"])
 
     def toneChanged_(self, sender):
         """A 话术 dropdown moved: the verdict is still valid, only the writing changes."""
@@ -1500,6 +1780,7 @@ class HudController(NSObject):
         self._set_collapsed(not self._collapsed)
 
     def togglePause_(self, sender):
+        self._auto_cancel("暂停读屏")
         self._paused = not self._paused
         self.pause_item.setTitle_("继续读屏" if self._paused else "暂停读屏")
         if self._paused:
@@ -1631,6 +1912,8 @@ class HudController(NSObject):
 
         prev = self._app
         self._app = app
+        self._auto_cancel()
+        self._auto_last_key = None
         if app is not None and getattr(self, "_cal_app_key", None) != app.key:
             # Regions are per app: swap before the first read of this app's window.
             self._load_calibration(app.key)
@@ -2025,6 +2308,7 @@ class HudController(NSObject):
             if newest.text != self.last_seen:
                 self.last_seen = newest.text
                 self.last_change_ts = now
+                self._auto_cancel("新消息到达")
                 # only on arrival: this function runs every second, and a per-tick line would
                 # bury the timing that matters
                 t = res.get("timing_ms") or {}
@@ -2309,6 +2593,16 @@ class HudController(NSObject):
         self._active_context = None
         self._observed_messages = None
         self._observed_offset = 0
+        # 自动回复（opt-in，见 autoreply.py / wechat_auto.py）：默认关，白名单 + 限频 +
+        # 倒计时 + 连续失败熔断。合成事件总闸在 wechat_auto 里单独检查。
+        self._auto = None
+        self._auto_lock = threading.Lock()
+        self._auto_cancel_evt = threading.Event()
+        self._auto_cancel_evt.set()
+        self._auto_last_send = 0.0
+        self._auto_failures = 0
+        self._auto_paused = False
+        self._auto_last_key = None
         self._fingerprint = None
         self._next_read_ts = 0
         self._push_reply("applyWaiting:", None, self._reply_epoch)
@@ -2448,6 +2742,8 @@ class HudController(NSObject):
         _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
              f" · 从分析开始到候选上屏")
         self._push("applyCandidates:", ranked)
+        if verdict and ranked:
+            self._auto_prepare(newest, verdict, ranked)
 
     @objc.python_method
     def _push(self, selector: str, payload=None):
