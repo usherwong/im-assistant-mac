@@ -842,6 +842,7 @@ class HudController(NSObject):
                 keys=(self._cal_msg_key, self._cal_input_key),
                 title_pick=prof.title_pick if prof else "top",
                 strip_time=bool(prof and prof.strip_inline_time),
+                noise=prof.noise if prof else None,
                 find_window=app.find_window)
         except (ValueError,OSError) as e:
             self._calibrating = False

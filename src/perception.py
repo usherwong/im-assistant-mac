@@ -565,12 +565,12 @@ def _same_frame(a: bytes | None, b: bytes | None) -> bool:
 # ---------------------------------------------------------------------- extraction
 
 
-def _is_noise(b: TextBlock) -> bool:
+def _is_noise(b: TextBlock, patterns=None) -> bool:
     if b.conf < MIN_CONF or len(b.text) < MIN_TEXT_LEN:
         return True
     if TIMESTAMP_RE.match(b.text):
         return True
-    return any(re.search(pat, b.text) for pat in UI_NOISE)
+    return any(re.search(pat, b.text) for pat in (patterns or UI_NOISE))
 
 
 def extract_chat_title(blocks: list[TextBlock]) -> str:
@@ -740,7 +740,7 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 
 
 def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
-                    title_pick="top", strip_time=False):
+                    title_pick="top", strip_time=False, noise=None):
     """Explicit selected region. Never infer a fill target from a message selection.
 
     capture_ms: time read_conversation already spent finding the window and capturing
@@ -756,7 +756,7 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
     x,y,w,h = calibration.rect()
     blocks = ocr_image(image, region=(x,1-y-h,w,h))
     header = ocr_image(image, region=(x,1-y,w,y))
-    candidates = [b for b in header if not _is_noise(b) and b.x < x+w*.75]
+    candidates = [b for b in header if not _is_noise(b, noise) and b.x < x+w*.75]
     title = ""
     if candidates:
         if title_pick == "nearest":
@@ -841,7 +841,8 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
         return read_calibrated(image, calibration, window, max_messages,
                                capture_ms=capture_ms,
                                title_pick=(profile.title_pick if profile is not None else "top"),
-                               strip_time=bool(profile is not None and profile.strip_inline_time))
+                               strip_time=bool(profile is not None and profile.strip_inline_time),
+                               noise=(profile.noise if profile is not None else None))
     from input_region import input_outline
     try:
         outline = input_outline(image) if image is not None else None

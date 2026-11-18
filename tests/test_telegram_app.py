@@ -131,22 +131,37 @@ class CalibratedTitleTests(unittest.TestCase):
         return [TextBlock('Telegram @ usher', 1.0, .10, .959, .20, .024),
                 TextBlock('Saved Messages', 1.0, .20, .881, .20, .024)]
 
-    def run_title(self, pick):
+    def run_title(self, pick, header=None, top=.12, noise=None):
         from calibration import Calibration
         import perception
-        header = self.header()
+        header = self.header() if header is None else header
         with patch.object(perception, 'ocr_image', side_effect=[[], header]), \
              patch('calibrated_messages.extract', return_value=[]), \
              patch('calibrated_messages.recover_numeric_bubbles', side_effect=lambda image, blocks, rect: blocks):
-            cal = Calibration(480.0, 616.0, 0.0, 616.0 * .12, 480.0, 616.0 * .78)
+            cal = Calibration(480.0, 616.0, 0.0, 616.0 * top, 480.0, 616.0 * (0.90 - top))
             win = {'wid': 1, 'title': '', 'w': 480.0, 'h': 616.0, 'x': 0.0, 'y': 0.0}
-            return perception.read_calibrated(object(), cal, win, title_pick=pick)['chat_title']
+            return perception.read_calibrated(object(), cal, win, title_pick=pick,
+                                              noise=noise)['chat_title']
 
     def test_nearest_skips_the_window_title(self):
         self.assertEqual(self.run_title('nearest'), 'Saved Messages')
 
     def test_top_keeps_legacy_behaviour(self):
         self.assertEqual(self.run_title('top'), 'Telegram @ usher')
+
+    def group_header(self):
+        # 群聊头部三行：窗口标题 / 群名 / 成员数副标题（离消息区最近）
+        return [TextBlock('Telegram @ usher', 1.0, .10, .959, .20, .024),
+                TextBlock('Project group', 1.0, .20, .916, .20, .022),
+                TextBlock('5 members, 2 online', 1.0, .20, .880, .20, .020)]
+
+    def test_group_subtitle_is_filtered_by_profile_noise(self):
+        header = self.group_header()
+        self.assertEqual(self.run_title('nearest', header=header, top=.16,
+                                        noise=TELEGRAM.noise), 'Project group')
+        # 没有 profile noise 时最近一行就是副标题——这正是要避免的串会话
+        self.assertEqual(self.run_title('nearest', header=header, top=.16),
+                         '5 members, 2 online')
 
 
 class InlineTimeTests(unittest.TestCase):

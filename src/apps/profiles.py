@@ -82,8 +82,11 @@ WECHAT = Profile(
 # admission — noise patterns only steer the title band and the auto path.
 TELEGRAM_NOISE = UI_NOISE + (
     r"^Write a message\.?$", r"^Saved Messages$", r"^Today$", r"^Yesterday$",
-    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(day)?\b", r"^\d+ members?$",
-    r"^(typing|online|last seen)\b.*$",
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(day)?\b",
+    # Group/private-chat subtitle under the conversation title: "5 members, 2 online",
+    # "23 members", "last seen recently". Without these the nearest-line title rule
+    # picks the subtitle and every chat in a group collides on one key.
+    r"^\d+\s+(members?|subscribers?)\b", r"^(typing|online|last seen)\b.*$",
 )
 
 TELEGRAM = Profile(

@@ -98,7 +98,7 @@ class CalibrationController(NSObject):
     # 交互逻辑（见 tests/test_calibration_ui_copy.py），装配体本身不测。
     def build(self, callback, saved='', image=None, win=None, saved_input='',
               keys=None, title_pick='top', find_window=None,
-              strip_time=False):  # pragma: no cover
+              strip_time=False, noise=None):  # pragma: no cover
         self.mode = 'messages'
         self.regions = {'messages': None, 'input': None}
         self.callback=callback; self.busy=False; self.preview=None; self.closed=False
@@ -107,6 +107,7 @@ class CalibrationController(NSObject):
         self.keys=keys or ('JEV_MESSAGE_REGION','JEV_INPUT_REGION')
         self.title_pick=title_pick
         self.strip_time=strip_time
+        self.noise=noise
         self._find_window=find_window or find_wechat_window
         self.win=win or find_wechat_window()
         if self.win is None: raise ValueError('请先打开聊天窗口。')
@@ -241,7 +242,7 @@ class CalibrationController(NSObject):
             try:
                 win=dict(wid=self.win.wid,w=self.win.w,h=self.win.h,x=self.win.x,y=self.win.y,title=self.win.title)
                 res=read_calibrated(self.image,c[0],win,100,title_pick=self.title_pick,
-                                    strip_time=self.strip_time)
+                                    strip_time=self.strip_time, noise=self.noise)
                 result=(c,res,None)
             except Exception as e:result=(c,None,type(e).__name__)
             self.performSelectorOnMainThread_withObject_waitUntilDone_('previewDone:',result,False)
