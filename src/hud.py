@@ -1371,7 +1371,7 @@ class HudController(NSObject):
             return
         app = getattr(self, "_app", None)
         key = getattr(self, "_reply_key", None)
-        if app is None or key is None or app.key != "wechat":
+        if app is None or key is None or app.key not in ("wechat", "telegram"):
             return
         chat = (key[1] or "").strip()
         if newest.text == getattr(self, "_auto_suppress_text", None):
@@ -1434,23 +1434,28 @@ class HudController(NSObject):
 
     @objc.python_method
     def _auto_do(self, text, chat, do_send, evt):
-        import wechat_auto
         target = getattr(self, "_input_target", None) or {}
         win = target.get("window") or ((getattr(self, "_last_full", None) or {}).get("window"))
         rect = target.get("rect") or target.get("visual_rect")
-        if not win or not rect:
-            _log("自动回复失败 · 没有可用的输入区位置")
-            self._push("applyStatus:", "自动回复需要先校准输入区：菜单栏 J → 校准区域…")
-            return
+        box = target.get("box")
         app = getattr(self, "_app", None)
-        if app is None or app.key != "wechat":
+        if app is None or app.key not in ("wechat", "telegram"):
             self._auto_cancel("聊天应用不在前台")
+            return
+        if not win or (app.key == "wechat" and not rect) or (app.key == "telegram" and box is None):
+            _log("自动回复失败 · 没有可用的输入区位置")
+            self._push("applyStatus:", "自动回复需要先校准消息区/输入区：菜单栏 J → 校准区域…")
             return
         if getattr(self, "_reply_key", None) and self._reply_key[1] != chat:
             self._auto_cancel("会话已切换")
             return
-        known = tuple(m.text for m in ((getattr(self, "_last_full", None) or {}).get("messages") or []))
-        ok, reason = wechat_auto.fill(text, win, rect, known=known)
+        if app.key == "wechat":
+            import wechat_auto
+            known = tuple(m.text for m in ((getattr(self, "_last_full", None) or {}).get("messages") or []))
+            ok, reason = wechat_auto.fill(text, win, rect, known=known)
+        else:
+            import ax_input
+            ok, reason = ax_input.fill_text(text, target=target)
         if evt.is_set():
             return
         if not ok:
@@ -1477,7 +1482,12 @@ class HudController(NSObject):
         if app is None or app.key != "wechat":
             self._auto_cancel("聊天应用不在前台")
             return
-        ok, reason = wechat_auto.send(win, rect, text, known=known)
+        if app.key == "wechat":
+            ok, reason = wechat_auto.send(win, rect, text, known=known)
+        else:
+            import ax_input
+            from apps.telegram_app import TelegramApp
+            ok, reason = ax_input.send(win, TelegramApp.bundle_ids)
         if ok:
             self._auto_last_send = time.time()
             self._auto_failures = 0
@@ -1519,8 +1529,8 @@ class HudController(NSObject):
 
     def toggleAutoFill_(self, sender):
         cfg = self._auto_cfg()
-        if not cfg.auto_fill and not self._require_synthetic_ok():
-            return
+        # 微信需要合成事件总闸，Telegram 走 AX 不需要——总闸只在 plan() 里按渠道检查，
+        # 菜单这里不再拦人（否则纯 Telegram 用户会被一个无关的开关挡住）。
         if not self._auto_set("JEV_AUTO_FILL", "0" if cfg.auto_fill else "1"):
             return
         self._auto_cancel()
@@ -1530,18 +1540,19 @@ class HudController(NSObject):
             note = f"自动填入已开启 · 白名单 {len(cfg.allowlist)} 个会话"
             if not cfg.allowlist:
                 note += "（菜单栏「加入自动回复白名单」）"
+            if not cfg.synthetic:
+                note += " · 微信仍需 JEV_SYNTHETIC_INPUT=1，Telegram 不需要"
             self._render("status", note, PALETTE["green"])
         else:
             self._render("status", "自动填入已关闭", PALETTE["muted"])
 
     def toggleAutoSend_(self, sender):
         cfg = self._auto_cfg()
-        if not cfg.auto_send and not self._require_synthetic_ok():
-            return
         if not cfg.auto_fill:
             self._render("status", "请先开启「自动填入候选」", PALETTE["amber"])
             return
-        if not cfg.auto_send and not cfg.acknowledged:
+        # 只有开了合成事件总闸（即微信高风险路径）才需要 #139 确认；Telegram 不需要。
+        if not cfg.auto_send and cfg.synthetic and not cfg.acknowledged:
             if not self._auto_warn_alert():
                 return
             self._auto_set("JEV_AUTO_ACK", "1")

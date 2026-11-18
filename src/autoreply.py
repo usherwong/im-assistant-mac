@@ -107,9 +107,11 @@ def plan(config: Config, *, app_key: str, chat_title: str, risk: float | None,
     """One decision per incoming message. Order matters: the reasons are user-facing."""
     if not config.auto_fill:
         return Plan(reason="自动填入未开启", config=config)
-    if app_key != "wechat":
-        return Plan(reason="自动回复目前只覆盖微信", config=config)
-    if not config.synthetic:
+    if app_key not in ("wechat", "telegram"):
+        return Plan(reason="自动回复目前覆盖微信与 Telegram", config=config)
+    # 微信 4.2.0 只能合成事件写入/发送（实测触发风控，见 README）；
+    # Telegram 走 AI 写入 + AXPress 发送，不需要这个总闸。
+    if app_key == "wechat" and not config.synthetic:
         return Plan(reason="合成事件总闸未开启（JEV_SYNTHETIC_INPUT）", config=config)
     title = title_key(chat_title)
     if not title:

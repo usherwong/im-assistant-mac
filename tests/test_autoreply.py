@@ -71,8 +71,10 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(p.fill)
         self.assertIn('未开启', p.reason)
 
-    def test_only_wechat_for_now(self):
-        self.assertFalse(self.plan(cfg(), app_key='telegram').fill)
+    def test_telegram_needs_no_synthetic_gate(self):
+        self.assertTrue(self.plan(cfg(synthetic=False), app_key='telegram').fill)
+        self.assertFalse(self.plan(cfg(synthetic=False), app_key='wechat').fill)
+        self.assertFalse(self.plan(cfg(), app_key='feishu').fill)
 
     def test_synthetic_gate(self):
         p = self.plan(cfg(synthetic=False))
