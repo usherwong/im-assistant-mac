@@ -192,11 +192,17 @@ class HudController(NSObject):
             return None
         self._input_calibration = None
         self._input_calibration_wid = None
-        self._input_calibration_saved = userconfig.get("JEV_INPUT_REGION")
+        self._input_calibration_saved = ""
         self._calibration = None
         self._calibration_wid = None
-        self._calibration_saved = userconfig.get("JEV_MESSAGE_REGION")
-        self._calibration_required = bool(self._calibration_saved)
+        self._calibration_saved = ""
+        self._calibration_required = False
+        self._cal_msg_key = "JEV_MESSAGE_REGION"
+        self._cal_input_key = "JEV_INPUT_REGION"
+        # Restore the saved regions at launch instead of waiting for a new calibration:
+        # every foreground switch calls this again with that app's own keys, so WeChat and
+        # Telegram keep separate selections (#154 的另一半).
+        self._load_calibration("wechat")
         self._calibrating = False
         self.last_seen = None          # newest message text observed
         self._reply_key = None         # (conversation, incoming text), never an outgoing message
@@ -757,6 +763,41 @@ class HudController(NSObject):
         self.status_item.setMenu_(menu)
 
     @objc.python_method
+    def _parse_calibration(self, raw):
+        from calibration import Calibration
+        if not raw:
+            return None
+        try:
+            return Calibration.parse(raw)
+        except (ValueError, TypeError):
+            return None
+
+    @objc.python_method
+    def _load_calibration(self, key):
+        """Point the active manual calibration at the app that just came to the front.
+
+        Each profile owns two env keys (WeChat keeps the original JEV_MESSAGE_REGION /
+        JEV_INPUT_REGION; Telegram uses the _TELEGRAM pair), so switching apps swaps the
+        selections instead of overwriting them. Saved values are parsed here, which also
+        makes a calibration survive a restart (#154).
+        """
+        from apps.profiles import by_key
+        prof = by_key(key)
+        self._cal_app_key = key
+        self._cal_msg_key = prof.message_key if prof else "JEV_MESSAGE_REGION"
+        self._cal_input_key = prof.input_key if prof else "JEV_INPUT_REGION"
+        self._calibration_saved = userconfig.get(self._cal_msg_key) or ""
+        self._input_calibration_saved = userconfig.get(self._cal_input_key) or ""
+        self._calibration_required = (bool(self._calibration_saved)
+                                      or bool(prof and prof.requires_calibration))
+        self._calibration = self._parse_calibration(self._calibration_saved)
+        self._input_calibration = self._parse_calibration(self._input_calibration_saved)
+        self._calibration_wid = None
+        self._input_calibration_wid = None
+        self._calib_ax_target = None
+        self._calib_ax_next = 0
+
+    @objc.python_method
     def _retire_calibration_results(self):
         self._foreground_epoch += 1
         self._reply_epoch += 1
@@ -776,15 +817,32 @@ class HudController(NSObject):
             self.calibration_controller.window.makeKeyAndOrderFront_(None)
             return
         from calibration_ui import CalibrationController
+        app = getattr(self, "_app", None)
+        if app is None:
+            self._render("status", "请先切到聊天窗口，再点校准", PALETTE["amber"])
+            return
+        try:
+            win = app.find_window(getattr(self, "_win_wid", None))
+        except Exception:
+            win = None
+        if win is None:
+            self._render("status", "没找到聊天窗口，请先打开并置于前台", PALETTE["red"])
+            return
         self._calibrating = True
         self._retire_calibration_results()
         self.applyWaiting_("正在校准消息区和输入区…")
         self.panel.orderOut_(None)
         self._ov_panel.orderOut_(None)
         try:
+            from apps.profiles import by_key
+            prof = by_key(app.key)
             self.calibration_controller = CalibrationController.alloc().init().build(
                 self._calibration_finished, self._calibration_saved,
-                saved_input=self._input_calibration_saved)
+                saved_input=self._input_calibration_saved, win=win,
+                keys=(self._cal_msg_key, self._cal_input_key),
+                title_pick=prof.title_pick if prof else "top",
+                strip_time=bool(prof and prof.strip_inline_time),
+                find_window=app.find_window)
         except (ValueError,OSError) as e:
             self._calibrating = False
             self._show()
@@ -812,7 +870,8 @@ class HudController(NSObject):
         from settings_config import read_document, write_settings
         path = userconfig.env_files()[0]
         try:
-            write_settings(path,read_document(path),{"JEV_MESSAGE_REGION":"", "JEV_INPUT_REGION":""})
+            write_settings(path,read_document(path),{self._cal_msg_key:"",
+                                                     self._cal_input_key:""})
         except (ValueError,OSError) as e:
             self._render("status",str(e),PALETTE["red"])
             return
@@ -1571,6 +1630,9 @@ class HudController(NSObject):
 
         prev = self._app
         self._app = app
+        if app is not None and getattr(self, "_cal_app_key", None) != app.key:
+            # Regions are per app: swap before the first read of this app's window.
+            self._load_calibration(app.key)
         self._foreground_epoch += 1
         self._reply_epoch += 1
         self._reply_key = None
@@ -1704,13 +1766,20 @@ class HudController(NSObject):
         if capture_foreground_epoch != self._foreground_epoch:
             return
         if getattr(self, "_calibration", None) and (res.get("calibration_error")
-                or (res.get("window") and res["window"]["wid"] != self._calibration_wid)):
+                or (self._calibration_wid is not None and res.get("window")
+                    and res["window"]["wid"] != self._calibration_wid)):
             self._calibration = None
             self._input_calibration = None
             self._input_calibration_wid = None
             self._retire_calibration_results()
             self._push("applyWaiting:", "聊天窗口已改变，请重新校准消息区域。")
             return
+        if (res.get("manual_calibration") and getattr(self, "_calibration", None) is not None
+                and self._calibration_wid is None and res.get("window")):
+            # A restored calibration has no window id yet; bind it to the first window
+            # that matched its size so a switch to another same-sized window still warns.
+            self._calibration_wid = res["window"]["wid"]
+            self._input_calibration_wid = res["window"]["wid"]
         # Re-check after the blocking capture/OCR.  tick_ may have observed a
         # complete leave+return while this worker was busy; in that case even a
         # currently-frontmost chat app does not make this old snapshot current.

@@ -28,6 +28,11 @@ SIDEBAR_X_MAX = 0.30
 
 # --- content filters ---
 TIMESTAMP_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
+# Telegram renders the message time at the bubble's bottom-right, so Vision returns it
+# glued to the body ("hello 19:18w/"). Only a whitespace-separated trailing time plus
+# optional read marks is removed: content that merely ends with a time after a space
+# ("约在 19:18") loses it too — a known trade-off, documented with the Telegram profile.
+INLINE_TIME_RE = re.compile(r"(?<=\s)\d{1,2}:\d{2}\s*[✓✔wWvV/]*\s*$")
 UI_NOISE = (r"折叠聊天", r"共\s*\d+", r"搜索", r"发送", r"拖入文件", r"按住说话",
             r"语音输入文字", r"按住鼠标", r"按住 说话", r"输入文字",
             r"^[\w\-\u4e00-\u9fa5]{2,20}[:：].*\.\.\..*[）)]>$")  # folded-chat banner
@@ -269,6 +274,72 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
                                   title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
                                   w=pw, h=ph)
     return best
+
+
+def _running_pids(bundle_ids: tuple[str, ...]) -> list[int]:
+    """PIDs of the running app(s) with these bundle ids; empty when pyobjc cannot answer."""
+    try:
+        import AppKit
+        pids = []
+        for bundle in bundle_ids:
+            apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle)
+            for app in (apps or []):
+                pids.append(int(app.processIdentifier()))
+        return pids
+    except Exception:
+        return []
+
+
+def find_window(profile, previous_wid: int | None = None) -> WindowInfo | None:
+    """The chat window of `profile`'s app.
+
+    WeChat keeps its own tuned selector (find_wechat_window): its detached 4.x windows,
+    main-window priority and sticky previous-wid behaviour are all specific to it. Other
+    profiles get the generic selector below: match the running process by bundle id (owner
+    names are localized), keep titled window-sized surfaces, prefer the AX-focused window,
+    then the previous one, then the largest. Requires the Screen Recording grant: without
+    it macOS hides window titles and every window is skipped.
+    """
+    if profile is None or profile.key == "wechat":
+        return find_wechat_window(previous_wid)
+    pids = set(_running_pids(profile.bundle_ids))
+    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+    wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
+    eligibles: list[WindowInfo] = []
+    for w in wins:
+        owner_pid = int(w.get("kCGWindowOwnerPID") or 0)
+        owner = w.get("kCGWindowOwnerName") or ""
+        if pids:
+            if owner_pid not in pids:
+                continue
+        elif owner not in profile.app_names:
+            continue
+        title = w.get("kCGWindowName") or ""
+        b = dict(w.get("kCGWindowBounds") or {})
+        wi = WindowInfo(
+            wid=int(w.get("kCGWindowNumber") or 0),
+            pid=owner_pid,
+            title=title,
+            x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
+            w=float(b.get("Width", 0)), h=float(b.get("Height", 0)),
+        )
+        if (not title or wi.w < profile.layout.min_window_w
+                or wi.h < profile.layout.min_window_h):
+            continue
+        eligibles.append(wi)
+    if not eligibles:
+        return None
+    focused = _ax_focused_frame(eligibles[0].pid)
+    if focused is not None:
+        for wi in eligibles:
+            if all(abs(a - b) <= 2 for a, b in zip(
+                    (wi.x, wi.y, wi.w, wi.h), focused)):
+                return wi
+    if previous_wid is not None:
+        for wi in eligibles:
+            if wi.wid == previous_wid:
+                return wi
+    return max(eligibles, key=lambda wi: (wi.w * wi.h, wi.wid))
 
 
 def capture_window(wid: int, out: Path,
@@ -668,13 +739,17 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 # ---------------------------------------------------------------------- public API
 
 
-def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0):
+def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0,
+                    title_pick="top", strip_time=False):
     """Explicit selected region. Never infer a fill target from a message selection.
 
     capture_ms: time read_conversation already spent finding the window and capturing
     before handing us the pixels. Timing is reported from the caller's t0, same
     caliber as the plain path — without it this branch reported capture=0 and the
     real capture cost vanished from the read log (#110).
+    title_pick: "top" takes the topmost header line (WeChat draws no title-bar text);
+    "nearest" takes the header line closest to the message region, skipping the macOS
+    window title that Telegram paints at the very top of the window.
     """
     from calibrated_messages import extract, recover_numeric_bubbles
     t0 = time.perf_counter()
@@ -684,13 +759,29 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0)
     candidates = [b for b in header if not _is_noise(b) and b.x < x+w*.75]
     title = ""
     if candidates:
-        top = max(b.y+b.h for b in candidates)
-        line = [b for b in candidates if top-(b.y+b.h) < b.h*.6]
+        if title_pick == "nearest":
+            ref = 1 - y
+            above = [b for b in candidates if b.y >= ref - 1e-6]
+            pick = (min(above, key=lambda b: b.y) if above
+                    else min(candidates, key=lambda b: abs(b.y - ref)))
+            top = pick.y + pick.h
+        else:
+            top = max(b.y+b.h for b in candidates)
+        line = [b for b in candidates if 0 <= top-(b.y+b.h) < b.h*.6]
         title = " ".join(b.text for b in sorted(line,key=lambda b:b.x))
     t_ocr = time.perf_counter()
     blocks = recover_numeric_bubbles(image, blocks, (x,y,w,h))
     t_recover = time.perf_counter()
     msgs = extract(image, blocks, (x,y,w,h), max_messages)
+    if strip_time:
+        for m in msgs:
+            if m.lines:
+                m.lines[-1] = INLINE_TIME_RE.sub("", m.lines[-1]).rstrip()
+                m.text = "\n".join(m.lines)
+            else:
+                m.text = INLINE_TIME_RE.sub("", m.text).rstrip()
+        msgs = [m for m in msgs
+                if m.text.strip() and not TIMESTAMP_RE.match(m.text.strip())]
     t_end = time.perf_counter()
     elapsed = (t_end-t0)*1000
     return {"ok": True, "unchanged": False, "window": window, "messages": msgs,
@@ -704,7 +795,8 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0)
 
 
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
-                      prev_fingerprint: bytes | None = None, prev_layout=None, calibration=None) -> dict:
+                      prev_fingerprint: bytes | None = None, prev_layout=None,
+                      calibration=None, profile=None) -> dict:
     """One-shot read: find window -> capture -> OCR -> messages.
 
     Pass the previous call's "fingerprint" and an unchanged chat pane short-circuits
@@ -713,9 +805,15 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     coordinates. The layout key must also match: resizing the window or input panel
     always forces fresh extraction. Both capture paths use the same image for the
     input boundary, fingerprint and OCR; an unresolved boundary yields no messages.
+
+    `profile` selects the app (window selector, title rule). A profile that requires
+    manual calibration (Telegram: no auto layout detection) returns a clear error
+    instead of OCR-ing whatever band the WeChat constants happen to land on.
     """
     t0 = time.perf_counter()
-    win = find_wechat_window(previous_wid)
+    if profile is not None and profile.requires_calibration and calibration is None:
+        return {"ok": False, "error": "请先校准消息区域（右上角校准图标）", "messages": []}
+    win = find_window(profile, previous_wid) if profile is not None else find_wechat_window(previous_wid)
     if win is None:
         return {"ok": False, "error": "Chat main window not found", "messages": []}
 
@@ -741,7 +839,9 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
                     "calibration_error": "窗口尺寸已改变，请重新校准消息区域。"}
         capture_ms = (time.perf_counter() - t0) * 1000
         return read_calibrated(image, calibration, window, max_messages,
-                               capture_ms=capture_ms)
+                               capture_ms=capture_ms,
+                               title_pick=(profile.title_pick if profile is not None else "top"),
+                               strip_time=bool(profile is not None and profile.strip_inline_time))
     from input_region import input_outline
     try:
         outline = input_outline(image) if image is not None else None

@@ -26,6 +26,10 @@ DEFAULTS = {
     "ANTHROPIC": ("https://api.anthropic.com", ""),
 }
 ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z_0-9]*)(\s*=\s*)(.*)$")
+# Per-app calibration keys: the legacy pair belongs to WeChat, every other profile gets a
+# _<KEY> suffix (JEV_MESSAGE_REGION_TELEGRAM) so calibrating one app cannot overwrite
+# another's selection.
+REGION_KEY = re.compile(r"^JEV_(?:MESSAGE|INPUT)_REGION(?:_[A-Z0-9_]+)?$")
 
 
 def read_document(path: Path) -> str:
@@ -44,7 +48,7 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
     allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {
         "JUDGE_BACKEND", "JEV_HISTORY", "JEV_CONTEXT_MESSAGES",
         "JEV_MESSAGE_REGION", "JEV_INPUT_REGION", "JEV_CANDIDATES_PER_TONE"}
-    if not changes.keys() <= allowed:
+    if not all(k in allowed or REGION_KEY.match(k) for k in changes):
         raise ValueError("不支持的配置项。")
     for value in changes.values():
         if any(c in value for c in "\r\n\0"):

@@ -4,7 +4,7 @@
 
 ## 目录与命令
 
-- `src/perception.py` 抓图+OCR+抽消息；`src/apps/` 聊天 App 适配器层（base.py 协议、capture_app.py 转调 perception/fill、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
+- `src/perception.py` 抓图+OCR+抽消息（微信专用窗口选择器 `find_wechat_window` + 通用 `find_window(profile)`）；`src/apps/` 聊天 App 适配器层（base.py 协议、profiles.py 渠道配置、capture_app.py 转调 perception/fill、telegram_app.py Telegram 渠道、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/ax_input.py` 原生 App 的 AX 写入/发送（Telegram）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 微信辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
 - 启动：`./start.command`（用户平时的方式；`Ctrl+C` 退出）。没有正式测试套件，分层自测：
 
   ```bash
@@ -21,6 +21,8 @@
 
 ## 架构与硬约束
 
+- **渠道 profile**：`src/apps/profiles.py` 是渠道常量的唯一来源（bundle id、窗口尺寸门槛、布局比例、UI 噪音、标题选取规则、校准 env 键）。微信的 profile 直接引用 perception 顶部常量，**别在别处复制一份**；Telegram 的 profile 来自 2026-11-18 探测，读走 OCR、写走 AX（见下条）。
+- **Telegram 读走 OCR、写走 AX**：`ru.keepcoder.Telegram` 的 `AXList` 子节点恒为 0，正文不在无障碍树里——读消息必须截图 + Vision OCR（`requires_calibration=True`，首次要求手动校准）。输入框是 `AXTextArea`、发送是 `AXButton` 的 `AXPress`，**这条渠道不许引入 CGEvent 合成事件或剪贴板粘贴**；`ax_input.py` 是唯一写入实现。已知 API 行为：`AXUIElementSetAttributeValue` 返回 -25200 时值**可能已经写入**，成功与否只认读回；发送按钮只在输入框有内容时出现且标签随语言变，定位靠「输入框同一行、最右侧的可用按钮」+ 标签提示。
 - **纯只读**：不注入、不 hook、不解密聊天数据。「填入」是唯一写动作：AX 写入优先；目标应用不提供 AX 输入控件时，fallback 是**复制到剪贴板 + 用户自己 ⌘V**（#139：`visual_fill` 的合成事件被截图型应用的账号风控识别为自动化，触发强制登出，已对该路径停用；合成事件出身可查，模拟平滑轨迹没用）——**别改回合成事件（visual_fill）也别改成模拟 Cmd+V**（前者触发风控见 #139；后者切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
 - **轮询**：定时器 0.25s 触发，`_next_read_ts` 门控分三档——静止（指纹相同）跳过 OCR、0.25s 一跳；**变化后先 0.45s×3 跳**（burst 下一条尽快被发现），持续再动才回 1s。**未变化帧仍要跑停稳判定**（复用 `_last_full` 缓存），否则分析永远不触发。停稳 `SETTLE_S=1.2` 是防刷屏**上限不能删**；连续 `STABLE_READS` 跳安静最早 `EARLY_SETTLE_S` 可提前开闸。最小分析间隔 `MIN_GAP_S=2.0` 不能删（预判命中路径本就免冷却）。
 - **预判+生成都早跑**（`_prejudge_loop` / `_pregen_loop`，同款 latest-wins 槽位）：消息一出现两个半边同时起跑，停稳门只消费「文本仍是最新」的结果；生成结果还要话术匹配（`_take_pregen`），迟到/过期结果由 `applyCandidates_` 的话术守卫挡掉。候选**先上屏再排序**（prob=None 显示「排序中」，`_rank_payload` 完成后原位重排）。
@@ -29,7 +31,7 @@
 - **本地推理用 float16**：MPS 对 bfloat16 算子覆盖不全会走慢路径（实测 ~1.4s vs ~0.75s，准确率不变）。
 - **OCR 用 Vision**：语言只留 `zh-Hans`（多加 en-US 逐块一致却慢 30%）、Accurate 档（Fast 漏字）、语言校正开着、别缩 ROI（丢上下文）。**采集只走带 3s 超时的 `screencapture` 子进程**（#83：macOS 27 上 `CGWindowListCreateImage` 会在 ScreenCaptureKit 内无限卡死，Python 线程无法取消；进程内 1x nominal 快路径已删除，**别改回去**）。代价：采集 ~130–270ms（原 4–29ms）、retina 下 OCR 按 2x 像素跑（原 1x ~100ms → 2x ~140ms+）；布局常量全是归一化的，不受影响。临时 PNG 必须经 `_load_png_image` 落成独立内存图像再删临时目录（懒加载 CGImage 失去像素会误判输入区漂移）。
 - **HTTP 走 keep-alive 池**（`generate.py` 的 `http_post_json`，judge_jev 共用）：每次 urllib.urlopen 新建 DNS+TCP+TLS 白付 ~0.1–0.3 s。网络异常换新连接重试一次；>=300 按 `urllib.error.HTTPError` 形状抛（调用方 `e.read()` 拿正文），不跟随重定向。
-- **配置只有 env 一种格式**（无 config.json）：`~/.config/jev-jarvis/env` 等，**凭据解析以 key 为准**——提供 key 的来源同时决定端点和模型。不提供第二种配置文件格式是有意为之。
+- **配置只有 env 一种格式**（无 config.json）：`~/.config/jev-jarvis/env` 等，**凭据解析以 key 为准**——提供 key 的来源同时决定端点和模型。不提供第二种配置文件格式是有意为之。校准区按 app 分开存：微信沿用 `JEV_MESSAGE_REGION` / `JEV_INPUT_REGION`，其他渠道用 `JEV_MESSAGE_REGION_<KEY>` / `JEV_INPUT_REGION_<KEY>`（`settings_config.REGION_KEY` 放行）；`HudController._load_calibration` 在前台 App 切换时换状态，并在启动时从 env 还原已保存的校准（#154 的一半）。校准输入区最小高度已从 60pt 放宽到 20pt（Telegram 输入框实测 26pt，#155 同源问题）。
 - 两种启动方式（`start.command` / `.app`）必须同 Python 3.12（包跟 `.python-version` 走）；`.app` 是「启动器包」（不冻结 torch，首次启动 uv 建 venv）。
 
 ## 已知的坑
@@ -46,4 +48,5 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 判断模型冷启动 10–20s 是已知问题（见 issue #1 预热方案）；启动后第一条慢是正常现象，别误判成回归。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+- **Telegram 的坑**：主窗口关闭时 `AXWindows` 读到 0（HUD 只在前台分析，正常路径不受影响）；窗口标题是 macOS 标题栏文本（`Telegram @ 账号`），会话标题在下一行——校准路径用 `title_pick="nearest"` 取离消息区最近的一行，否则会把账号标题当成会话名。CGWindow 标题需要屏幕录制权限，没有授权时 `find_window` 会把窗口全部跳过。Telegram 默认窗口 480×616 点，比微信的 500×400 门槛窄，故 profile 自带 `min_window_w=380`。
 - **workflow 文件里步骤级 `env:` 键不能只留注释**：纯注释子节点解析为 `null`，GitHub 会以 `Invalid workflow file` 拒载整个 workflow（#137 评审拦下的）。pullfrog.yml 这类 dispatch 型 workflow 的改动 **PR 内 CI 绿验证不了**（定义取自 master），GitHub 侧的信号是 push 后 0 秒失败的占位 run；真正验证只能等合并后由下一个 dispatch 完成。

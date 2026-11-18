@@ -32,7 +32,8 @@ def hud_harness():
              '_prejudge_loop', '_pregen_loop', '_analyze', '_run_generation', 'reload_conversations',
              '_context_changed', 'save_background', 'configure_context', 'clear_history',
              '_regen_work', '_regenerate_work', 'regenerateReply_', '_rank_payload', '_payload_from_gen',
-             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_'}
+             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_',
+             '_load_calibration', '_parse_calibration'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -58,6 +59,7 @@ def hud_harness():
              'frontmost_app': Mock(return_value=fake_app), 'FAKE_APP': fake_app, 'UNKNOWN': UNKNOWN,
              'APPS': (fake_app,),
              'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
+             'userconfig': SimpleNamespace(get=Mock(return_value=None)),
              'read_conversation': read_conv,
              'find_wechat_window': Mock(return_value=None),
              'PALETTE': {'muted': None, 'red': 'RED', 'green': 'GREEN', 'amber': None},
@@ -66,6 +68,9 @@ def hud_harness():
              'SETTLE_S': 1.2, 'STABLE_READS': 3, 'EARLY_SETTLE_S': .7, 'MIN_GAP_S': 2}
     module = ast.fix_missing_locations(ast.Module(body=[klass], type_ignores=[]))
     exec(compile(module, str(ROOT / 'src/hud.py'), 'exec'), scope)
+    # 夹具假设「当前 App 的校准已经载入」：_set_foreground_state 只在 key 变化时重载，
+    # 否则每个测试准备的手动校准对象都会被 userconfig 里的空值覆盖。
+    scope['Harness']._cal_app_key = 'wechat'
     return scope['Harness'], scope
 
 

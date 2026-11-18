@@ -34,7 +34,8 @@ class CaptureAppTests(unittest.TestCase):
             fw.assert_called_once_with(7)
             self.assertEqual(app.read_conversation(previous_wid=1, prev_fingerprint=b'x', prev_layout=(1, 2, 3)),
                              {'ok': True})
-            rc.assert_called_once_with(previous_wid=1, prev_fingerprint=b'x', prev_layout=(1, 2, 3))
+            rc.assert_called_once_with(profile=app.profile, previous_wid=1,
+                                       prev_fingerprint=b'x', prev_layout=(1, 2, 3))
             self.assertEqual(app.locate_input({'wid': 1}), {'box': None})
             li.assert_called_once_with({'wid': 1})
             self.assertEqual(app.fill_text('hi', target={'box': 'b'}), (True, '已填入'))
@@ -81,11 +82,19 @@ class RegistryTests(unittest.TestCase):
             ws.sharedWorkspace.side_effect = RuntimeError
             self.assertIs(registry.frontmost_app(), registry.UNKNOWN)
 
+    def test_telegram_by_bundle_id_and_name(self):
+        from apps import registry
+        with patch.object(registry, '_frontmost', return_value=('ru.keepcoder.Telegram', 'Telegram')):
+            self.assertEqual(registry.frontmost_app().key, 'telegram')
+        with patch.object(registry, '_frontmost', return_value=('', 'Telegram')):
+            self.assertEqual(registry.frontmost_app().key, 'telegram')
+        self.assertIsNone(registry.app_by_key('feishu'))
+
     def test_app_by_key(self):
         from apps import registry
         self.assertEqual(registry.app_by_key('qq').display_name, '聊天工具')
         self.assertIsNone(registry.app_by_key('feishu'))
-        self.assertEqual([a.key for a in registry.APPS], ['wechat', 'qq'])
+        self.assertEqual([a.key for a in registry.APPS], ['wechat', 'qq', 'telegram'])
 
 
 if __name__ == '__main__':
