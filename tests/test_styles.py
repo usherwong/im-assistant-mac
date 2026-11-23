@@ -46,6 +46,20 @@ class CustomToneTests(unittest.TestCase):
         self.assertEqual(len(styles.REJECTED_TONES), 1)
 
 
+class HeadhunterToneTests(unittest.TestCase):
+    def test_headhunter_is_first_in_dropdowns(self):
+        self.assertEqual(styles.labels()[0], '猎头')
+
+    def test_headhunter_is_the_first_default_slot(self):
+        self.assertEqual(styles.DEFAULT_SLOTS[0], '猎头')
+        self.assertLessEqual(len(styles.DEFAULT_SLOTS), styles.MAX_SLOTS)
+
+    def test_headhunter_prompt_keeps_the_recruiting_angle(self):
+        desc = styles.BUILTIN['猎头']
+        for word in ('猎头', '机会', '不催'):
+            self.assertIn(word, desc)
+
+
 class StripLabelTests(unittest.TestCase):
     """strip_label 对全部内置话术成立：加 label 只改 BUILTIN，不该再漏 strip（#70）。"""
 
@@ -98,9 +112,9 @@ class GoutoujunshiToneTests(unittest.TestCase):
         self.assertIn("不油腻", styles.PRESETS["狗头军师·会撩"])
         self.assertIn("不追问", styles.PRESETS["狗头军师·抽离"])
 
-    def test_default_slots_untouched(self):
-        # 恋爱向是场景自选，默认三件套仍是职场向，存量用户零感知
-        self.assertEqual(styles.DEFAULT_SLOTS, ["高情商话术", "贴吧老哥 v1.0", "阴阳怪气"])
+    def test_default_slots_are_headhunter_plus_the_workplace_pair(self):
+        # 猎头按用户要求放第一位；恋爱向仍是场景自选，不占默认槽
+        self.assertEqual(styles.DEFAULT_SLOTS, ["猎头", "高情商话术", "贴吧老哥 v1.0"])
 
 
 if __name__ == '__main__':

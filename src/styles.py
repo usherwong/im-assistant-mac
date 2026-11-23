@@ -57,6 +57,12 @@ PER_TONE = candidate_count(userconfig.get("JEV_CANDIDATES_PER_TONE"))
 # actually separates the voices. The trailing constraint matters as much as the rest: a tone
 # with no ceiling slides back into generic politeness by the second line.
 BUILTIN: dict[str, str] = {
+    "猎头": (
+        "专业猎头顾问：先顺着对方话头接一句，再用一句**具体信息**把话题带到机会上"
+        "（行业 + 方向 + 级别，或团队/地点），最后用一个低压力的问句收尾"
+        "（「最近有看机会吗」「方便发你份 JD 吗」）。语气克制专业、信息密度高，"
+        "不画大饼、不催、不油腻，不说「年薪百万」这类空话，也别写成 HR 面试官。"
+    ),
     "高情商话术": (
         "像公司里那个谁都说好的老同事：先接住对方情绪（「我理解」「确实」），再说事实和下一步，"
         "拒绝也带替代方案加一个具体时间点。不说教、不绕圈子、句尾不堆「呢/哦/啦」。"
@@ -131,7 +137,7 @@ BUILTIN: dict[str, str] = {
 # What the panel starts with. The third slot used to default to 不用; users were found
 # opening it and picking 阴阳怪气 by hand every session, so the default now ships it on —
 # hud.py caps the list at MAX_SLOTS, so this can grow without touching the panel build.
-DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0", "阴阳怪气"]
+DEFAULT_SLOTS: list[str] = ["猎头", "高情商话术", "贴吧老哥 v1.0"]
 NONE_LABEL = "不用"          # the third dropdown's way of saying "only two candidates"
 
 CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones
