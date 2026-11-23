@@ -133,7 +133,7 @@ class HudReplyTests(unittest.TestCase):
         self.h._next_read_ts = time.time() + 60  # … and the next one is not due
         self.h._refresh_model_status = Mock()
         self.h._position_near = Mock()
-        HUD['find_wechat_window'].return_value = win
+        HUD['FAKE_APP'].find_window.return_value = win
         self.h.tick_(None)
         self.h._position_near.assert_called_once_with(
             {'wid': 7, 'x': 100, 'y': 200, 'w': 550, 'h': 719})

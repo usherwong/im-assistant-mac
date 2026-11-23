@@ -4,7 +4,7 @@
 
 ## 目录与命令
 
-- `src/perception.py` 抓图+OCR+抽消息；`src/apps/` 聊天 App 适配器层（base.py 协议、capture_app.py 转调 perception/fill、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
+- `src/perception.py` 抓图+OCR+抽消息（微信 `find_wechat_window` + 通用 `find_window(profile)`、`read_conversation(profile=)`）；`src/apps/` 聊天 App 适配器层（base.py 协议、profiles.py 渠道元数据、capture_app.py 转调 perception/fill、telegram_app.py Telegram 渠道、telegram_reader.py Telegram 读取层、ax_app.py 无障碍树读目标、registry.py 按前台 App 分发）；`src/ax_input.py` 原生 App 的 AX 写入（Telegram 填入）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
 - 启动：`./start.command`（用户平时的方式；`Ctrl+C` 退出）。没有正式测试套件，分层自测：
 
   ```bash
@@ -21,6 +21,8 @@
 
 ## 架构与硬约束
 
+- **Telegram 读法（性能红线）**：Telegram 不暴露消息行，正文必须 OCR；但**单次读只许 OCR 一次消息区**（2x），未变化帧用像素指纹短路（空闲 ~125ms，零 OCR），标题/输入框/单双栏全部走 AX（`apps/telegram_reader.py`）。别退回「手动校准 + 每次全窗 OCR + 多趟 OCR」的老做法——实测那会让工作线程持续 500ms~1s 占满，面板卡顿。归属用几何（贴左=对方、贴右=我），不要依赖气泡色差。
+- **手动校准只约束微信**：HUD 的校准门槛/传参/失效判断都只看 `app.key == "wechat"`；Telegram 自动推布局。别把微信的校准对象传给 Telegram 读路径，也别让 Telegram 的窗口切换清掉微信校准。
 - **纯只读**：不注入、不 hook、不解密聊天数据。「填入」是唯一写动作：AX 写入优先；目标应用不提供 AX 输入控件时，fallback 是**复制到剪贴板 + 用户自己 ⌘V**（#139：`visual_fill` 的合成事件被截图型应用的账号风控识别为自动化，触发强制登出，已对该路径停用；合成事件出身可查，模拟平滑轨迹没用）——**别改回合成事件（visual_fill）也别改成模拟 Cmd+V**（前者触发风控见 #139；后者切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
 - **轮询**：定时器 0.25s 触发，`_next_read_ts` 门控分三档——静止（指纹相同）跳过 OCR、0.25s 一跳；**变化后先 0.45s×3 跳**（burst 下一条尽快被发现），持续再动才回 1s。**未变化帧仍要跑停稳判定**（复用 `_last_full` 缓存），否则分析永远不触发。停稳 `SETTLE_S=1.2` 是防刷屏**上限不能删**；连续 `STABLE_READS` 跳安静最早 `EARLY_SETTLE_S` 可提前开闸。最小分析间隔 `MIN_GAP_S=2.0` 不能删（预判命中路径本就免冷却）。
 - **预判+生成都早跑**（`_prejudge_loop` / `_pregen_loop`，同款 latest-wins 槽位）：消息一出现两个半边同时起跑，停稳门只消费「文本仍是最新」的结果；生成结果还要话术匹配（`_take_pregen`），迟到/过期结果由 `applyCandidates_` 的话术守卫挡掉。候选**先上屏再排序**（prob=None 显示「排序中」，`_rank_payload` 完成后原位重排）。
@@ -46,4 +48,5 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 判断模型冷启动 10–20s 是已知问题（见 issue #1 预热方案）；启动后第一条慢是正常现象，别误判成回归。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+- **Telegram 的坑**：`AXRows`/`AXCellForColumnAndRow` 都读不到消息行（-25200/-25212），别再试；头部 `Back` 按钮只在单栏模式出现，分栏时聊天区左边界按标题按钮左缘 −3% 推；窗口 480×616 比微信的 500×400 门槛窄，profile 里单独设了 380×400；AXWindows 在 Telegram 非前台时可能为 0（HUD 只在前台分析，正常路径不受影响）。
 - **workflow 文件里步骤级 `env:` 键不能只留注释**：纯注释子节点解析为 `null`，GitHub 会以 `Invalid workflow file` 拒载整个 workflow（#137 评审拦下的）。pullfrog.yml 这类 dispatch 型 workflow 的改动 **PR 内 CI 绿验证不了**（定义取自 master），GitHub 侧的信号是 push 后 0 秒失败的占位 run；真正验证只能等合并后由下一个 dispatch 完成。

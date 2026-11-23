@@ -42,6 +42,7 @@ def hud_harness():
     read_conv = Mock()
     fake_app = SimpleNamespace(key='wechat', display_name='微信', needs_screen_capture=True,
                                read_conversation=read_conv, locate_input=locate,
+                               find_window=Mock(return_value=None),
                                fill_text=Mock(return_value=(True, '已填入')), warm=Mock(return_value=0.0))
     scope = {'LowMemoryError': LowMemoryError, 'ModelNotDownloadedError': ModelNotDownloadedError,
              'chat_context': chat_context, 'styles': styles,

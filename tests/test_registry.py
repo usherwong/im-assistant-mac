@@ -81,11 +81,18 @@ class RegistryTests(unittest.TestCase):
             ws.sharedWorkspace.side_effect = RuntimeError
             self.assertIs(registry.frontmost_app(), registry.UNKNOWN)
 
+    def test_telegram_by_bundle_id_and_name(self):
+        from apps import registry
+        with patch.object(registry, '_frontmost', return_value=('ru.keepcoder.Telegram', 'Telegram')):
+            self.assertEqual(registry.frontmost_app().key, 'telegram')
+        with patch.object(registry, '_frontmost', return_value=('', 'Telegram')):
+            self.assertEqual(registry.frontmost_app().key, 'telegram')
+
     def test_app_by_key(self):
         from apps import registry
         self.assertEqual(registry.app_by_key('qq').display_name, '聊天工具')
         self.assertIsNone(registry.app_by_key('feishu'))
-        self.assertEqual([a.key for a in registry.APPS], ['wechat', 'qq'])
+        self.assertEqual([a.key for a in registry.APPS], ['wechat', 'qq', 'telegram'])
 
 
 if __name__ == '__main__':

@@ -1173,7 +1173,10 @@ class HudController(NSObject):
 
     def fillCandidate_(self, sender):
         """Write the candidate into the current chat app's input box (via self._app)."""
-        if getattr(self,"_calibration_required",False) and self._input_calibration is None:
+        current_app = getattr(self, "_app", None)
+        if (current_app is not None and current_app.key == "wechat"
+                and getattr(self, "_calibration_required", False)
+                and self._input_calibration is None):
             self._render("status", "请点击右上角校准图标，确认消息区和输入区。", PALETTE["amber"])
             return
         idx = sender.tag()
@@ -1628,7 +1631,7 @@ class HudController(NSObject):
         # follows its AX read path. The read path's applyPosition stays as a backstop;
         # when both agree the dead-band absorbs the duplicate.
         if not self._paused and getattr(app, "needs_screen_capture", False):
-            win = find_wechat_window(previous_wid=getattr(self, "_win_wid", None))
+            win = app.find_window(getattr(self, "_win_wid", None))
             if win is not None:
                 self._position_near({"wid": win.wid, "x": win.x, "y": win.y,
                                      "w": win.w, "h": win.h})
@@ -1678,12 +1681,21 @@ class HudController(NSObject):
             self._push("applyError:", "需要辅助功能权限 · 系统设置 › 隐私与安全性")
             self._next_read_ts = time.time() + SLOW_TICK
             return
+        if app.key == "telegram" and not fill.has_accessibility():
+            # Telegram 的布局（标题/输入框/单双栏）靠 AX 推，读屏路径也要这个权限。
+            if not getattr(self, "_asked_accessibility", False):
+                self._asked_accessibility = True
+                fill.request_accessibility()
+            self._push("applyError:", "需要辅助功能权限 · 系统设置 › 隐私与安全性")
+            self._next_read_ts = time.time() + SLOW_TICK
+            return
         if getattr(self, "_calibrating", False):
             return
-        if (app.needs_screen_capture
+        manual_mode = app.key == "wechat" and app.needs_screen_capture
+        if (manual_mode
                 and getattr(self, "_calibration_required", False)
                 and self._calibration is None):
-            # 校准只约束截图路径；文本接口路径读界面树，无消息区可校准。
+            # 手动校准只约束微信（其他渠道自动推布局）；文本接口路径无消息区可校准。
             self._push("applyWaiting:", "请点击右上角校准图标，确认消息区和输入区。")
             self._next_read_ts = time.time() + SLOW_TICK
             return
@@ -1692,7 +1704,7 @@ class HudController(NSObject):
         try:
             # calibration 只被截图路径接受；文本接口适配器签名里没有它，不传。
             extra = {}
-            if app.needs_screen_capture and getattr(self, "_calibration", None):
+            if manual_mode and getattr(self, "_calibration", None):
                 extra = {"calibration": self._calibration}
             res = app.read_conversation(previous_wid=self._win_wid,
                                         prev_fingerprint=self._fingerprint,
@@ -1703,7 +1715,8 @@ class HudController(NSObject):
             return
         if capture_foreground_epoch != self._foreground_epoch:
             return
-        if getattr(self, "_calibration", None) and (res.get("calibration_error")
+        if manual_mode and getattr(self, "_calibration", None) and (
+                res.get("calibration_error")
                 or (res.get("window") and res["window"]["wid"] != self._calibration_wid)):
             self._calibration = None
             self._input_calibration = None
