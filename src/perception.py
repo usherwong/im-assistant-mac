@@ -271,6 +271,63 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     return best
 
 
+def _running_pids(bundle_ids: tuple[str, ...]) -> list[int]:
+    """这些 bundle id 对应的运行中进程；查询失败返回空列表。"""
+    try:
+        import AppKit
+        pids = []
+        for bundle in bundle_ids:
+            apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle)
+            for app in (apps or []):
+                pids.append(int(app.processIdentifier()))
+        return pids
+    except Exception:
+        return []
+
+
+def find_window(profile, previous_wid: int | None = None) -> WindowInfo | None:
+    """按渠道找聊天窗口。微信继续用它调好的 find_wechat_window；其他渠道走通用逻辑：
+    按 bundle id 找到进程 → 只保留有标题、够大的窗口 → 优先 AX 焦点窗口 → 其次上次的
+    窗口 → 最后取面积最大者。没有屏幕录制权限时窗口标题为空，这里会全部跳过。
+    """
+    if profile is None or profile.key == "wechat":
+        return find_wechat_window(previous_wid)
+    pids = set(_running_pids(profile.bundle_ids))
+    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
+    wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
+    eligible: list[WindowInfo] = []
+    for w in wins:
+        owner_pid = int(w.get("kCGWindowOwnerPID") or 0)
+        owner = w.get("kCGWindowOwnerName") or ""
+        if pids:
+            if owner_pid not in pids:
+                continue
+        elif owner not in profile.app_names:
+            continue
+        title = w.get("kCGWindowName") or ""
+        b = dict(w.get("kCGWindowBounds") or {})
+        wi = WindowInfo(wid=int(w.get("kCGWindowNumber") or 0), pid=owner_pid, title=title,
+                        x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
+                        w=float(b.get("Width", 0)), h=float(b.get("Height", 0)))
+        if (not title or wi.w < profile.min_window_w
+                or wi.h < profile.min_window_h):
+            continue
+        eligible.append(wi)
+    if not eligible:
+        return None
+    focused = _ax_focused_frame(eligible[0].pid)
+    if focused is not None:
+        for wi in eligible:
+            if all(abs(a - b) <= 2 for a, b in zip(
+                    (wi.x, wi.y, wi.w, wi.h), focused)):
+                return wi
+    if previous_wid is not None:
+        for wi in eligible:
+            if wi.wid == previous_wid:
+                return wi
+    return max(eligible, key=lambda wi: (wi.w * wi.h, wi.wid))
+
+
 def capture_window(wid: int, out: Path,
                    timeout_s: float = SUBPROCESS_CAPTURE_TIMEOUT_S) -> bool:
     try:
@@ -704,7 +761,8 @@ def read_calibrated(image, calibration, window, max_messages=12, capture_ms=0.0)
 
 
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
-                      prev_fingerprint: bytes | None = None, prev_layout=None, calibration=None) -> dict:
+                      prev_fingerprint: bytes | None = None, prev_layout=None,
+                      calibration=None, profile=None) -> dict:
     """One-shot read: find window -> capture -> OCR -> messages.
 
     Pass the previous call's "fingerprint" and an unchanged chat pane short-circuits
@@ -714,6 +772,10 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     always forces fresh extraction. Both capture paths use the same image for the
     input boundary, fingerprint and OCR; an unresolved boundary yields no messages.
     """
+    if profile is not None and profile.key == "telegram":
+        from apps.telegram_reader import read_telegram
+        return read_telegram(max_messages=max_messages, previous_wid=previous_wid,
+                             prev_fingerprint=prev_fingerprint, prev_layout=prev_layout)
     t0 = time.perf_counter()
     win = find_wechat_window(previous_wid)
     if win is None:
